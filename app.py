@@ -20,17 +20,20 @@ st.sidebar.subheader("Limitler")
 gap_threshold_hours = st.sidebar.number_input("Kesinti Limiti (Saat)", min_value=1, value=2, help="Bu süreden uzun veri akışı olmazsa kesinti sayılır.")
 min_temp_limit = st.sidebar.number_input("Min Sıcaklık (°C)", value=2.0)
 max_temp_limit = st.sidebar.number_input("Max Sıcaklık (°C)", value=8.0)
-header_row = st.sidebar.number_input("Başlık Satır No", min_value=0, value=8, help="Dosyadaki sütun isimlerinin olduğu satır (Genelde 8).")
+
+# --- Sabit Ayarlar ---
+# Dosya formatı standart olduğu için başlık satırı sabitlendi.
+HEADER_ROW = 8 
 
 # --- Fonksiyon: Dosya Yükleme ve Temizleme ---
 def analyze_data(file):
     try:
         # 1. Okuma (Encoding Hatası Korumalı)
         try:
-            df = pd.read_csv(file, header=header_row, encoding='utf-8')
+            df = pd.read_csv(file, header=HEADER_ROW, encoding='utf-8')
         except UnicodeDecodeError:
             file.seek(0) 
-            df = pd.read_csv(file, header=header_row, encoding='ISO-8859-9')
+            df = pd.read_csv(file, header=HEADER_ROW, encoding='ISO-8859-9')
         
         # 2. Sütun Temizliği
         df.columns = df.columns.str.strip()
@@ -147,8 +150,7 @@ if uploaded_file is not None:
             fig.add_hline(y=min_temp_limit, line_dash="dash", line_color="blue", annotation_text=f"Min ({min_temp_limit}°C)")
             fig.add_hline(y=max_temp_limit, line_dash="dash", line_color="red", annotation_text=f"Max ({max_temp_limit}°C)")
             
-            # İhlal bölgelerini renklendirme (Opsiyonel görselleştirme)
-            # Limit dışı verileri farklı renkte nokta olarak ekleyebiliriz
+            # İhlal bölgelerini renklendirme
             anomalies = df[(df['Temp'] < min_temp_limit) | (df['Temp'] > max_temp_limit)]
             if not anomalies.empty:
                 fig.add_scatter(x=anomalies['Timestamp'], y=anomalies['Temp'], mode='markers', name='İhlaller', marker=dict(color='orange', size=6))
