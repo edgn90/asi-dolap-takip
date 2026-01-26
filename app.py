@@ -4,45 +4,38 @@ import plotly.express as px
 from datetime import timedelta
 
 # --- Sayfa Ayarları ---
-st.set_page_config(page_title="Aşı Dolabı Analiz", layout="wide")
+st.set_page_config(page_title="Aşı Dolabı Analiz Raporu", layout="wide")
 
-st.title("🌡️ Aşı/İlaç Dolabı Sıcaklık ve Kesinti Analizi")
+st.title("🌡️ Detaylı Aşı/İlaç Dolabı Sıcaklık Analizi")
 st.markdown("""
-Bu uygulama, yüklenen CSV dosyalarındaki sensör verilerini analiz eder.
-**Tespit edilenler:**
-1. Belirlenen süreden uzun **Veri Kesintileri**
-2. Belirlenen limitlerin dışındaki **Sıcaklık İhlalleri**
+Bu sistem, yüklenen sıcaklık kayıtlarını analiz ederek **veri kesintilerini** ve **sıcaklık ihlallerini** olay bazlı raporlar.
 """)
 
 # --- Sidebar (Ayarlar) ---
-st.sidebar.header("Ayarlar")
+st.sidebar.header("⚙️ Analiz Ayarları")
 uploaded_file = st.sidebar.file_uploader("CSV Dosyası Yükle", type=["csv"])
 
-# Parametreler
-gap_threshold_hours = st.sidebar.number_input("Kesinti Limiti (Saat)", min_value=1, value=2)
+st.sidebar.divider()
+st.sidebar.subheader("Limitler")
+gap_threshold_hours = st.sidebar.number_input("Kesinti Limiti (Saat)", min_value=1, value=2, help="Bu süreden uzun veri akışı olmazsa kesinti sayılır.")
 min_temp_limit = st.sidebar.number_input("Min Sıcaklık (°C)", value=2.0)
 max_temp_limit = st.sidebar.number_input("Max Sıcaklık (°C)", value=8.0)
-header_row = st.sidebar.number_input("Başlık Satırı (Genelde 8)", min_value=0, value=8)
+header_row = st.sidebar.number_input("Başlık Satır No", min_value=0, value=8, help="Dosyadaki sütun isimlerinin olduğu satır (Genelde 8).")
 
-# --- Analiz Fonksiyonu ---
+# --- Fonksiyon: Dosya Yükleme ve Temizleme ---
 def analyze_data(file):
     try:
-        # Önce standart UTF-8 okumayı dene
+        # 1. Okuma (Encoding Hatası Korumalı)
         try:
             df = pd.read_csv(file, header=header_row, encoding='utf-8')
         except UnicodeDecodeError:
-            # UTF-8 hata verirse, dosya imlecini başa sar ve Türkçe (ISO-8859-9) dene
             file.seek(0) 
             df = pd.read_csv(file, header=header_row, encoding='ISO-8859-9')
         
-        # Sütun isimlerini kontrol et ve temizle
+        # 2. Sütun Temizliği
         df.columns = df.columns.str.strip()
-        
-        # Gerekli sütunları bul (Büyük/küçük harf duyarlılığını kaldırmak için upper() kullanıyoruz)
-        # Sütun isimlerini tamamen büyük harfe çevirip arama yapalım
         upper_cols = [c.upper() for c in df.columns]
         
-        # Orijinal sütun ismini bulmak için index kullanalım
         time_col = None
         temp_col = None
 
@@ -53,83 +46,68 @@ def analyze_data(file):
                 temp_col = df.columns[i]
         
         if not time_col or not temp_col:
-            st.error(f"Gerekli sütunlar (ZAMAN, SICAKLIK) bulunamadı. Mevcut sütunlar: {list(df.columns)}")
+            st.error(f"Gerekli sütunlar (ZAMAN, SICAKLIK) bulunamadı. Mevcut: {list(df.columns)}")
             return None
 
-        # Tarih formatını düzelt
+        # 3. Format Dönüşümleri
         df['Timestamp'] = pd.to_datetime(df[time_col], dayfirst=True, errors='coerce')
         df = df.dropna(subset=['Timestamp']).sort_values('Timestamp')
 
-        # Sıcaklık formatını düzelt (Virgül -> Nokta)
         if df[temp_col].dtype == object:
             df['Temp'] = df[temp_col].str.replace(',', '.').astype(float)
         else:
             df['Temp'] = df[temp_col]
 
-        return df, time_col, temp_col
+        return df
 
     except Exception as e:
         st.error(f"Dosya işleme hatası: {e}")
         return None
 
-# --- Ana Akış ---
-if uploaded_file is not None:
-    result = analyze_data(uploaded_file)
+# --- Fonksiyon: İhlal Gruplama ve Analizi ---
+def find_violation_events(df, min_val, max_val):
+    # Her satırı etiketle: 0=Normal, -1=Min Altı, 1=Max Üstü
+    df = df.copy()
+    df['Status'] = 0 
+    df.loc[df['Temp'] < min_val, 'Status'] = -1
+    df.loc[df['Temp'] > max_val, 'Status'] = 1
     
-    if result:
-        df, time_col_name, temp_col_name = result
+    # Değişim noktalarını bularak grupla (Ardışık aynı durumdakiler tek grup olur)
+    df['Group'] = (df['Status'] != df['Status'].shift()).cumsum()
+    
+    events = []
+    
+    # Sadece ihlal olan grupları (Status != 0) analiz et
+    for _, group in df[df['Status'] != 0].groupby('Group'):
+        status_code = group['Status'].iloc[0]
+        start_time = group['Timestamp'].min()
+        end_time = group['Timestamp'].max()
+        duration = end_time - start_time
         
-        # 1. Veri Kesintisi Analizi
-        df['TimeDiff'] = df['Timestamp'].diff()
-        gap_threshold = timedelta(hours=gap_threshold_hours)
-        gaps = df[df['TimeDiff'] >= gap_threshold].copy()
-        
-        # 2. Sıcaklık İhlal Analizi
-        anomalies = df[(df['Temp'] < min_temp_limit) | (df['Temp'] > max_temp_limit)].copy()
-
-        # --- Özet Kartları ---
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Toplam Kayıt", len(df))
-        if not df.empty:
-            col2.metric("Tarih Aralığı", f"{df['Timestamp'].min().date()} - {df['Timestamp'].max().date()}")
+        if status_code == -1:
+            v_type = "❄️ Min Altı (Soğuk)"
+            extreme_val = group['Temp'].min()
         else:
-            col2.metric("Tarih Aralığı", "-")
+            v_type = "🔥 Max Üstü (Sıcak)"
+            extreme_val = group['Temp'].max()
             
-        col3.metric("Veri Kesintisi", f"{len(gaps)} Adet", delta_color="inverse" if len(gaps)>0 else "normal")
-        col4.metric("Sıcaklık İhlali", f"{len(anomalies)} Adet", delta_color="inverse" if len(anomalies)>0 else "normal")
+        events.append({
+            "İhlal Türü": v_type,
+            "Başlangıç": start_time,
+            "Bitiş": end_time,
+            "Süre": str(duration).split('.')[0], # Milisaniyeyi at
+            "Uç Değer (°C)": extreme_val
+        })
+        
+    return pd.DataFrame(events)
 
-        st.divider()
-
-        # --- Sekmeler ---
-        tab1, tab2, tab3 = st.tabs(["📉 Grafik", "⚠️ Veri Kesintileri", "🚨 Sıcaklık İhlalleri"])
-
-        with tab1:
-            st.subheader("Sıcaklık Grafiği")
-            if not df.empty:
-                fig = px.line(df, x='Timestamp', y='Temp', title="Zaman İçinde Sıcaklık Değişimi")
-                
-                # Limit çizgileri ekle
-                fig.add_hline(y=min_temp_limit, line_dash="dash", line_color="red", annotation_text="Min Limit")
-                fig.add_hline(y=max_temp_limit, line_dash="dash", line_color="red", annotation_text="Max Limit")
-                
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("Grafik çizilecek veri yok.")
-
-        with tab2:
-            st.subheader(f"{gap_threshold_hours} Saatten Uzun Veri Kesintileri")
-            if not gaps.empty:
-                gaps['Kesinti Başlangıcı'] = df['Timestamp'].shift(1)
-                gaps['Kesinti Bitişi'] = df['Timestamp']
-                gaps['Süre'] = gaps['TimeDiff'].astype(str)
-                
-                st.dataframe(gaps[['Kesinti Başlangıcı', 'Kesinti Bitişi', 'Süre']], use_container_width=True)
-            else:
-                st.success("Belirlenen sürenin üzerinde veri kesintisi yok.")
-
-        with tab3:
-            st.subheader(f"{min_temp_limit}°C Altı ve {max_temp_limit}°C Üstü Kayıtlar")
-            if not anomalies.empty:
-                st.dataframe(anomalies[['Timestamp', 'Temp']], use_container_width=True)
-            else:
-                st.success("Sıcaklık ihlali yok.")
+# --- ANA EKRAN ---
+if uploaded_file is not None:
+    df = analyze_data(uploaded_file)
+    
+    if df is not None:
+        # --- 1. Başlık ve Tarih Bilgisi ---
+        start_date = df['Timestamp'].min()
+        end_date = df['Timestamp'].max()
+        
+        st.info(f"📅 **Dosya Kapsamı:** {start_date.strftime('%d.%m.%Y %H:%M:%S')}  —  {end_
