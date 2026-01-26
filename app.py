@@ -78,7 +78,6 @@ class ReportPDF(FPDF):
             return
 
         # Sütun Genişlikleri (Otomatik)
-        # A4 genişliği ~190mm. Sütun sayısına bölüyoruz.
         col_width = 190 / len(df.columns)
         
         # Başlıklar
@@ -94,7 +93,6 @@ class ReportPDF(FPDF):
         
         for index, row in df.iterrows():
             for item in row:
-                # Hücreye sığması için string çevirimi ve kırpma gerekebilir
                 text = tr_fix(str(item))
                 self.cell(col_width, 7, text, border=1, align='C')
             self.ln()
@@ -168,6 +166,19 @@ if uploaded_file is not None:
     df, metadata = analyze_data(uploaded_file)
     
     if df is not None:
+        # Tarih Aralığı Tespiti (Veriden)
+        start_date = df['Timestamp'].min()
+        end_date = df['Timestamp'].max()
+        start_str = start_date.strftime('%d.%m.%Y %H:%M:%S')
+        end_str = end_date.strftime('%d.%m.%Y %H:%M:%S')
+
+        # --- ARAYÜZ BİLGİ KARTI ---
+        st.info(f"""
+        **Birim:** {metadata.get('Birim','-')} | **Depo:** {metadata.get('Depo','-')}
+        
+        📅 **Rapor Tarih Aralığı:** {start_str} — {end_str}
+        """)
+
         # 1. Kesintiler
         df['TimeDiff'] = df['Timestamp'].diff()
         gap_threshold = timedelta(hours=gap_threshold_hours)
@@ -184,16 +195,16 @@ if uploaded_file is not None:
             status = group['Status'].iloc[0]
             v_type = "Min Alti" if status == -1 else "Max Ustu"
             
-            # --- SÜRE HESAPLAMA EKLENDİ ---
-            start_t = group['Timestamp'].min()
-            end_t = group['Timestamp'].max()
-            duration = end_t - start_t
+            # Süre hesaplama
+            s_t = group['Timestamp'].min()
+            e_t = group['Timestamp'].max()
+            dur = e_t - s_t
             
             violation_events.append({
                 "Tur": v_type,
-                "Baslangic": str(start_t),
-                "Bitis": str(end_t),
-                "Sure": str(duration), # Yeni Kolon
+                "Baslangic": str(s_t),
+                "Bitis": str(e_t),
+                "Sure": str(dur),
                 "En Uc Deger": group['Temp'].min() if status == -1 else group['Temp'].max()
             })
         df_violations = pd.DataFrame(violation_events)
@@ -208,9 +219,7 @@ if uploaded_file is not None:
         else:
             df_gaps_report = pd.DataFrame(columns=["Baslangic", "Bitis", "Sure"])
 
-        # --- ARAYÜZ ---
-        st.info(f"Birim: **{metadata.get('Birim','-')}** | Depo: **{metadata.get('Depo','-')}**")
-        
+        # --- SEKMELER ---
         tab1, tab2 = st.tabs(["⚠️ Veri Kesintileri", "🚨 Sıcaklık İhlalleri"])
 
         with tab1:
