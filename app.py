@@ -83,4 +83,157 @@ class ReportPDF(FPDF):
         col_width = 190 / len(df.columns)
         
         # Başlıklar
-        self.set_font('
+        self.set_font('Arial', 'B', 10)
+        self.set_fill_color(200, 220, 255) 
+        for col in df.columns:
+            self.cell(col_width, 8, tr_fix(col), border=1, fill=True, align='C')
+        self.ln()
+        
+        # Veriler
+        self.set_font('Arial', '', 9)
+        self.set_fill_color(255, 255, 255)
+        
+        for index, row in df.iterrows():
+            for item in row:
+                self.cell(col_width, 7, tr_fix(str(item)), border=1, align='C')
+            self.ln()
+
+# --- Veri İşleme Fonksiyonları ---
+def extract_metadata(file):
+    file.seek(0)
+    meta = {}
+    try:
+        lines = [file.readline().decode('ISO-8859-9').strip() for _ in range(HEADER_ROW)]
+        for line in lines:
+            parts = line.split(',')
+            clean_parts = [p.strip() for p in parts if p.strip()]
+            
+            if len(clean_parts) >= 2:
+                key = clean_parts[0].replace('"', '')
+                val = clean_parts[1].replace('"', '')
+                
+                if "Birim" in key and "Stok" not in key: meta['Birim'] = val
+                elif "Depo" in key: meta['Depo'] = val
+                elif "Stok" in key: meta['Stok'] = val
+                elif "Baslangiç" in key or "Baslangic" in key: meta['Baslangic'] = val
+                elif "Bitis" in key: meta['Bitis'] = val
+    except Exception:
+        pass
+    return meta
+
+def analyze_data(file):
+    metadata = extract_metadata(file)
+    file.seek(0)
+    try:
+        try:
+            df = pd.read_csv(file, header=HEADER_ROW, encoding='utf-8')
+        except UnicodeDecodeError:
+            file.seek(0) 
+            df = pd.read_csv(file, header=HEADER_ROW, encoding='ISO-8859-9')
+        
+        df.columns = df.columns.str.strip()
+        upper_cols = [c.upper() for c in df.columns]
+        
+        time_col = None
+        temp_col = None
+
+        for i, col in enumerate(upper_cols):
+            if "ZAMAN" in col or "DATE" in col: time_col = df.columns[i]
+            if "SICAKLIK" in col or "TEMP" in col: temp_col = df.columns[i]
+        
+        if not time_col or not temp_col: return None, None
+
+        df['Timestamp'] = pd.to_datetime(df[time_col], dayfirst=True, errors='coerce')
+        df = df.dropna(subset=['Timestamp']).sort_values('Timestamp')
+
+        if df[temp_col].dtype == object:
+            df['Temp'] = df[temp_col].str.replace(',', '.').astype(float)
+        else:
+            df['Temp'] = df[temp_col]
+
+        return df, metadata
+
+    except Exception:
+        return None, None
+
+def create_pdf_bytes(df, metadata, title):
+    pdf = ReportPDF(metadata, title)
+    pdf.add_page()
+    pdf.add_table(df)
+    return pdf.output(dest='S').encode('latin-1', 'ignore')
+
+# --- ANA AKIŞ ---
+if uploaded_file is not None:
+    df, metadata = analyze_data(uploaded_file)
+    
+    if df is not None:
+        # 1. Kesintiler
+        df['TimeDiff'] = df['Timestamp'].diff()
+        gap_threshold = timedelta(hours=gap_threshold_hours)
+        gaps = df[df['TimeDiff'] >= gap_threshold].copy()
+        
+        # 2. İhlaller
+        df['Status'] = 0 
+        df.loc[df['Temp'] < min_temp_limit, 'Status'] = -1
+        df.loc[df['Temp'] > max_temp_limit, 'Status'] = 1
+        df['Group'] = (df['Status'] != df['Status'].shift()).cumsum()
+        
+        violation_events = []
+        for _, group in df[df['Status'] != 0].groupby('Group'):
+            status = group['Status'].iloc[0]
+            v_type = "Min Alti" if status == -1 else "Max Ustu"
+            violation_events.append({
+                "Tur": v_type,
+                "Baslangic": str(group['Timestamp'].min()),
+                "Bitis": str(group['Timestamp'].max()),
+                "En Uc Deger": group['Temp'].min() if status == -1 else group['Temp'].max()
+            })
+        df_violations = pd.DataFrame(violation_events)
+
+        # 3. Kesinti Tablosu
+        if not gaps.empty:
+            df_gaps_report = pd.DataFrame({
+                "Baslangic": df.loc[gaps.index - 1, 'Timestamp'].values.astype(str),
+                "Bitis": gaps['Timestamp'].values.astype(str),
+                "Sure": gaps['TimeDiff'].astype(str)
+            })
+        else:
+            df_gaps_report = pd.DataFrame(columns=["Baslangic", "Bitis", "Sure"])
+
+        # --- ARAYÜZ ---
+        st.info(f"Birim: **{metadata.get('Birim','-')}** | Depo: **{metadata.get('Depo','-')}**")
+        
+        tab1, tab2 = st.tabs(["⚠️ Veri Kesintileri", "🚨 Sıcaklık İhlalleri"])
+
+        with tab1:
+            st.subheader(f"Veri Kesintisi Raporu (> {gap_threshold_hours} Saat)")
+            if not df_gaps_report.empty:
+                st.dataframe(df_gaps_report, use_container_width=True)
+                
+                pdf_data = create_pdf_bytes(df_gaps_report, metadata, "Veri Kesintisi Raporu")
+                st.download_button(
+                    label="📄 Kesinti Raporunu PDF İndir",
+                    data=pdf_data,
+                    file_name="veri_kesinti_raporu.pdf",
+                    mime="application/pdf"
+                )
+            else:
+                st.success("Bu kriterlere uygun veri kesintisi bulunamadı.")
+
+        with tab2:
+            st.subheader("Sıcaklık İhlal Raporu")
+            if not df_violations.empty:
+                st.dataframe(df_violations, use_container_width=True)
+                
+                pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu")
+                st.download_button(
+                    label="📄 İhlal Raporunu PDF İndir",
+                    data=pdf_data_v,
+                    file_name="sicaklik_ihlal_raporu.pdf",
+                    mime="application/pdf"
+                )
+            else:
+                st.success("Herhangi bir sıcaklık ihlali bulunamadı.")
+
+else:
+    st.info("Lütfen CSV dosyasını yükleyin.")
