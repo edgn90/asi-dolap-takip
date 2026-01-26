@@ -50,7 +50,6 @@ class ReportPDF(FPDF):
         # 2. Metadata (Her sayfada görünür)
         self.set_font('Arial', '', 9)
         
-        # Metadata bilgilerini yaz
         self.cell(40, 6, tr_fix("Birim:"), border=0)
         self.cell(0, 6, tr_fix(self.metadata.get('Birim', '-')), ln=True)
         
@@ -74,28 +73,30 @@ class ReportPDF(FPDF):
         self.cell(0, 10, f'Sayfa {self.page_no()}', 0, 0, 'C')
 
     def add_table(self, df):
-        # Basit tablo çizimi
         if df.empty:
             self.cell(0, 10, tr_fix("Veri bulunamadi."), ln=True, align='C')
             return
 
-        # Sütun Genişlikleri
+        # Sütun Genişlikleri (Otomatik)
+        # A4 genişliği ~190mm. Sütun sayısına bölüyoruz.
         col_width = 190 / len(df.columns)
         
         # Başlıklar
-        self.set_font('Arial', 'B', 10)
+        self.set_font('Arial', 'B', 9)
         self.set_fill_color(200, 220, 255) 
         for col in df.columns:
             self.cell(col_width, 8, tr_fix(col), border=1, fill=True, align='C')
         self.ln()
         
         # Veriler
-        self.set_font('Arial', '', 9)
+        self.set_font('Arial', '', 8)
         self.set_fill_color(255, 255, 255)
         
         for index, row in df.iterrows():
             for item in row:
-                self.cell(col_width, 7, tr_fix(str(item)), border=1, align='C')
+                # Hücreye sığması için string çevirimi ve kırpma gerekebilir
+                text = tr_fix(str(item))
+                self.cell(col_width, 7, text, border=1, align='C')
             self.ln()
 
 # --- Veri İşleme Fonksiyonları ---
@@ -182,10 +183,17 @@ if uploaded_file is not None:
         for _, group in df[df['Status'] != 0].groupby('Group'):
             status = group['Status'].iloc[0]
             v_type = "Min Alti" if status == -1 else "Max Ustu"
+            
+            # --- SÜRE HESAPLAMA EKLENDİ ---
+            start_t = group['Timestamp'].min()
+            end_t = group['Timestamp'].max()
+            duration = end_t - start_t
+            
             violation_events.append({
                 "Tur": v_type,
-                "Baslangic": str(group['Timestamp'].min()),
-                "Bitis": str(group['Timestamp'].max()),
+                "Baslangic": str(start_t),
+                "Bitis": str(end_t),
+                "Sure": str(duration), # Yeni Kolon
                 "En Uc Deger": group['Temp'].min() if status == -1 else group['Temp'].max()
             })
         df_violations = pd.DataFrame(violation_events)
