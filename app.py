@@ -110,4 +110,73 @@ if uploaded_file is not None:
         start_date = df['Timestamp'].min()
         end_date = df['Timestamp'].max()
         
-        st.info(f"📅 **Dosya Kapsamı:** {start_date.strftime('%d.%m.%Y %H:%M:%S')}  —  {end_
+        st.info(f"📅 **Dosya Kapsamı:** {start_date.strftime('%d.%m.%Y %H:%M:%S')}  —  {end_date.strftime('%d.%m.%Y %H:%M:%S')}")
+
+        # --- Analizler ---
+        # A. Kesinti Analizi
+        df['TimeDiff'] = df['Timestamp'].diff()
+        gap_threshold = timedelta(hours=gap_threshold_hours)
+        gaps = df[df['TimeDiff'] >= gap_threshold].copy()
+        
+        # B. Sıcaklık İhlal Analizi (Olay Bazlı)
+        violation_events = find_violation_events(df, min_temp_limit, max_temp_limit)
+        
+        # --- Özet Metrikler ---
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Toplam Kayıt Sayısı", f"{len(df):,}")
+        col2.metric("Analiz Süresi (Gün)", f"{(end_date - start_date).days} Gün")
+        
+        gap_count = len(gaps)
+        col3.metric("Veri Kesintisi", f"{gap_count} Kez", 
+                    delta="-Sorun" if gap_count > 0 else "Normal", delta_color="inverse")
+        
+        violation_count = len(violation_events)
+        col4.metric("Sıcaklık İhlali", f"{violation_count} Olay", 
+                    delta="-İhlal Var" if violation_count > 0 else "Güvenli", delta_color="inverse")
+
+        st.divider()
+
+        # --- Sekmeli Detay Görünümü ---
+        tab_graph, tab_violations, tab_gaps, tab_data = st.tabs(["📉 Grafik", "🚨 Sıcaklık İhlal Raporu", "⚠️ Veri Kesintileri", "📄 Ham Veri"])
+
+        with tab_graph:
+            st.subheader("Zaman Serisi Sıcaklık Grafiği")
+            fig = px.line(df, x='Timestamp', y='Temp', title="Sıcaklık Değişimi")
+            
+            # Limit Çizgileri
+            fig.add_hline(y=min_temp_limit, line_dash="dash", line_color="blue", annotation_text=f"Min ({min_temp_limit}°C)")
+            fig.add_hline(y=max_temp_limit, line_dash="dash", line_color="red", annotation_text=f"Max ({max_temp_limit}°C)")
+            
+            # İhlal bölgelerini renklendirme (Opsiyonel görselleştirme)
+            # Limit dışı verileri farklı renkte nokta olarak ekleyebiliriz
+            anomalies = df[(df['Temp'] < min_temp_limit) | (df['Temp'] > max_temp_limit)]
+            if not anomalies.empty:
+                fig.add_scatter(x=anomalies['Timestamp'], y=anomalies['Temp'], mode='markers', name='İhlaller', marker=dict(color='orange', size=6))
+
+            st.plotly_chart(fig, use_container_width=True)
+
+        with tab_violations:
+            st.subheader("Sıcaklık İhlal Detayları")
+            if not violation_events.empty:
+                st.warning(f"Toplam {len(violation_events)} adet ihlal olayı tespit edildi.")
+                st.dataframe(violation_events, use_container_width=True)
+            else:
+                st.success(f"✅ Harika! Tüm veriler {min_temp_limit}°C ile {max_temp_limit}°C arasında.")
+
+        with tab_gaps:
+            st.subheader(f"{gap_threshold_hours} Saatten Uzun Veri Kesintileri")
+            if not gaps.empty:
+                gaps_report = pd.DataFrame({
+                    "Kesinti Başlangıcı": df.loc[gaps.index - 1, 'Timestamp'].values, # Bir önceki satır
+                    "Kesinti Bitişi (Veri Gelişi)": gaps['Timestamp'],
+                    "Kesinti Süresi": gaps['TimeDiff'].astype(str)
+                })
+                st.dataframe(gaps_report, use_container_width=True)
+            else:
+                st.success("✅ Veri akışında uzun süreli kesinti tespit edilmedi.")
+
+        with tab_data:
+            st.dataframe(df)
+
+else:
+    st.info("Lütfen sol menüden analiz etmek istediğiniz CSV dosyasını yükleyin.")
