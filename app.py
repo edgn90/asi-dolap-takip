@@ -79,29 +79,25 @@ class ReportPDF(FPDF):
         self.cell(0, 10, f'Sayfa {self.page_no()}', 0, 0, 'C')
 
     def add_violation_summary(self, summary_data):
-        """İhlal Raporu için PDF'e özel özet tablo ekler"""
         self.set_font('Arial', 'B', 11)
         self.cell(0, 8, tr_fix("IHLAL OZET TABLOSU"), ln=True)
         
         self.set_font('Arial', '', 10)
-        # Tablo Başlıkları
         col_w = 45
         self.cell(col_w, 7, tr_fix("Kriter"), 1)
         self.cell(col_w, 7, tr_fix("Toplam Sure"), 1)
         self.cell(col_w, 7, tr_fix("En Uc Deger"), 1)
         self.ln()
         
-        # Üst Limit Satırı
         self.cell(col_w, 7, tr_fix("Ust Limit Asimi"), 1)
         self.cell(col_w, 7, tr_fix(summary_data['max_dur']), 1)
         self.cell(col_w, 7, tr_fix(summary_data['max_val']), 1)
         self.ln()
         
-        # Alt Limit Satırı
         self.cell(col_w, 7, tr_fix("Alt Limit Asimi"), 1)
         self.cell(col_w, 7, tr_fix(summary_data['min_dur']), 1)
         self.cell(col_w, 7, tr_fix(summary_data['min_val']), 1)
-        self.ln(10) # Tablo sonrası boşluk
+        self.ln(10)
 
     def add_table(self, df):
         if df.empty:
@@ -169,6 +165,7 @@ def analyze_data(file):
         df['Timestamp'] = pd.to_datetime(df[time_col], dayfirst=True, errors='coerce')
         df = df.dropna(subset=['Timestamp']).sort_values('Timestamp')
 
+        # Sıcaklık Dönüşümü (NaN değerleri korur)
         if df[temp_col].dtype == object:
             df['Temp'] = df[temp_col].str.replace(',', '.').astype(float)
         else:
@@ -182,11 +179,8 @@ def analyze_data(file):
 def create_pdf_bytes(df, metadata, title, violation_summary=None):
     pdf = ReportPDF(metadata, title)
     pdf.add_page()
-    
-    # Eğer ihlal özeti varsa (summary_data doluysa) tablo öncesi ekle
     if violation_summary:
         pdf.add_violation_summary(violation_summary)
-        
     pdf.add_table(df)
     return pdf.output(dest='S').encode('latin-1', 'ignore')
 
@@ -206,69 +200,108 @@ if uploaded_file is not None:
         📅 **Rapor Tarih Aralığı (Header):** {disp_start} — {disp_end}
         """)
 
-        # 1. KESİNTİ ANALİZİ (Header Dahil)
+        # --- 1. KESİNTİ ANALİZİ ---
         gap_threshold = timedelta(hours=gap_threshold_hours)
         all_gaps = []
 
+        # A) Zaman Farkı Kaynaklı Kesintiler (Satır Eksikliği)
         df['TimeDiff'] = df['Timestamp'].diff()
         df['PrevTimestamp'] = df['Timestamp'].shift(1)
         internal_gaps = df[df['TimeDiff'] >= gap_threshold].copy()
         
         for _, row in internal_gaps.iterrows():
             all_gaps.append({
-                "Tip": "Veri Arası",
+                "Tip": "Veri Arası Bosluk",
                 "Baslangic": row['PrevTimestamp'],
                 "Bitis": row['Timestamp'],
                 "Sure": row['TimeDiff']
             })
 
+        # B) Başlangıç Kaybı
         if meta_start_dt:
             first_data_time = df['Timestamp'].min()
             start_diff = first_data_time - meta_start_dt
             if start_diff >= gap_threshold:
                 all_gaps.insert(0, {
-                    "Tip": "Başlangıç Kaybı",
+                    "Tip": "Baslangic Kaybi",
                     "Baslangic": meta_start_dt,
                     "Bitis": first_data_time,
                     "Sure": start_diff
                 })
 
+        # C) Bitiş Kaybı
         if meta_end_dt:
             last_data_time = df['Timestamp'].max()
             end_diff = meta_end_dt - last_data_time
             if end_diff >= gap_threshold:
                 all_gaps.append({
-                    "Tip": "Bitiş Kaybı",
+                    "Tip": "Bitis Kaybi",
                     "Baslangic": last_data_time,
                     "Bitis": meta_end_dt,
                     "Sure": end_diff
                 })
-
+        
+        # D) Sıcaklık Verisi Yok (Boş Hücreler)
+        # Temp sütunu NaN olan ama Timestamp olan satırlar
+        missing_temps = df[df['Temp'].isna()].copy()
+        if not missing_temps.empty:
+            # Ardışık boş satırları grupla
+            missing_temps['Group'] = (missing_temps['Timestamp'].diff() > pd.Timedelta('5min')).cumsum() 
+            # Not: Yukarıdaki basit gruplama yerine index bazlı gruplama daha sağlıklıdır.
+            
+            # Ana DF üzerinde 'IsMissing' ile gruplama yapalım:
+            df['IsMissingTemp'] = df['Temp'].isna()
+            df['MissingGroup'] = (df['IsMissingTemp'] != df['IsMissingTemp'].shift()).cumsum()
+            
+            # Sadece True (Eksik) olan grupları al
+            for _, group in df[df['IsMissingTemp']].groupby('MissingGroup'):
+                s_t = group['Timestamp'].min()
+                e_t = group['Timestamp'].max()
+                dur = e_t - s_t
+                
+                # Eğer tek satırsa (dur=0), süreyi belirtmek için sembolik bir gösterim veya 0 bırakılabilir.
+                # Kullanıcının seçtiği EŞİK DEĞERİNE göre filtreleyelim.
+                # Tek bir boş satır genellikle 2 saati geçmez. Ancak kullanıcı eşiği 0 yaparsa görmeli.
+                if dur >= gap_threshold:
+                    all_gaps.append({
+                        "Tip": "Sicaklik Verisi Yok",
+                        "Baslangic": s_t,
+                        "Bitis": e_t,
+                        "Sure": dur
+                    })
+        
+        # Kesinti Listesini Oluştur ve Sırala
         if all_gaps:
             df_gaps_report = pd.DataFrame(all_gaps)
+            # Tarihe göre sırala
+            df_gaps_report = df_gaps_report.sort_values('Baslangic')
+            
+            # Formatlama
             df_gaps_report['Baslangic'] = df_gaps_report['Baslangic'].apply(lambda x: x.strftime('%d.%m.%Y %H:%M:%S'))
             df_gaps_report['Bitis'] = df_gaps_report['Bitis'].apply(lambda x: x.strftime('%d.%m.%Y %H:%M:%S'))
             df_gaps_report['Sure'] = df_gaps_report['Sure'].astype(str).apply(lambda x: x.split('.')[0])
+            
             df_gaps_report = df_gaps_report[["Tip", "Baslangic", "Bitis", "Sure"]]
         else:
             df_gaps_report = pd.DataFrame()
 
 
-        # 2. SICAKLIK İHLALİ ve ÖZET HESAPLAMA
-        df['Status'] = 0 
-        df.loc[df['Temp'] < min_temp_limit, 'Status'] = -1
-        df.loc[df['Temp'] > max_temp_limit, 'Status'] = 1
-        df['Group'] = (df['Status'] != df['Status'].shift()).cumsum()
+        # --- 2. SICAKLIK İHLALİ ve ÖZET ---
+        df_clean = df.dropna(subset=['Temp']).copy() # İhlal hesabı için boş sıcaklıkları çıkar
+        
+        df_clean['Status'] = 0 
+        df_clean.loc[df_clean['Temp'] < min_temp_limit, 'Status'] = -1
+        df_clean.loc[df_clean['Temp'] > max_temp_limit, 'Status'] = 1
+        df_clean['Group'] = (df_clean['Status'] != df_clean['Status'].shift()).cumsum()
         
         violation_events = []
         
-        # İstatistik Değişkenleri
         total_max_duration = timedelta(0)
         total_min_duration = timedelta(0)
         global_max_val = None
         global_min_val = None
         
-        for _, group in df[df['Status'] != 0].groupby('Group'):
+        for _, group in df_clean[df_clean['Status'] != 0].groupby('Group'):
             status = group['Status'].iloc[0]
             v_type = "Min Alti" if status == -1 else "Max Ustu"
             
@@ -276,18 +309,14 @@ if uploaded_file is not None:
             e_t = group['Timestamp'].max()
             dur = e_t - s_t
             
-            # En uç değer
             extreme = group['Temp'].min() if status == -1 else group['Temp'].max()
             
-            # İstatistik Güncelle
-            if status == 1: # Max
+            if status == 1: 
                 total_max_duration += dur
-                if global_max_val is None or extreme > global_max_val:
-                    global_max_val = extreme
-            else: # Min
+                if global_max_val is None or extreme > global_max_val: global_max_val = extreme
+            else: 
                 total_min_duration += dur
-                if global_min_val is None or extreme < global_min_val:
-                    global_min_val = extreme
+                if global_min_val is None or extreme < global_min_val: global_min_val = extreme
 
             violation_events.append({
                 "Tur": v_type,
@@ -299,12 +328,11 @@ if uploaded_file is not None:
         
         df_violations = pd.DataFrame(violation_events)
         
-        # Özet Sözlük (PDF ve Ekran için)
         summary_stats = {
             "max_dur": format_duration(total_max_duration) if total_max_duration > timedelta(0) else "-",
-            "max_val": f"{global_max_val} °C" if global_max_val is not None else "-",
+            "max_val": f"{global_max_val} C" if global_max_val is not None else "-",
             "min_dur": format_duration(total_min_duration) if total_min_duration > timedelta(0) else "-",
-            "min_val": f"{global_min_val} °C" if global_min_val is not None else "-"
+            "min_val": f"{global_min_val} C" if global_min_val is not None else "-"
         }
 
         # --- SEKMELER ---
@@ -317,23 +345,20 @@ if uploaded_file is not None:
                 pdf_data = create_pdf_bytes(df_gaps_report, metadata, "Veri Kesintisi Raporu")
                 st.download_button("📄 Kesinti Raporunu PDF İndir", pdf_data, "veri_kesinti_raporu.pdf", "application/pdf")
             else:
-                st.success("Belirlenen kriterlerde (Header Tarihleri dahil) kesinti bulunamadı.")
+                st.success("Belirlenen kriterlerde kesinti bulunamadı.")
 
         with tab2:
             st.subheader("Sıcaklık İhlal Raporu")
             
-            # ÖZET KARTLAR (EKRAN)
             col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Toplam Üst Limit Aşım Süresi", summary_stats["max_dur"])
+            col1.metric("Toplam Üst Limit Aşım", summary_stats["max_dur"])
             col2.metric("En Yüksek Sıcaklık", summary_stats["max_val"])
-            col3.metric("Toplam Alt Limit Aşım Süresi", summary_stats["min_dur"])
+            col3.metric("Toplam Alt Limit Aşım", summary_stats["min_dur"])
             col4.metric("En Düşük Sıcaklık", summary_stats["min_val"])
-            
             st.divider()
             
             if not df_violations.empty:
                 st.dataframe(df_violations, use_container_width=True)
-                # Özet bilgisini PDF fonksiyonuna gönderiyoruz
                 pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu", violation_summary=summary_stats)
                 st.download_button("📄 İhlal Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal_raporu.pdf", "application/pdf")
             else:
