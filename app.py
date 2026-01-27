@@ -1,5 +1,7 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
+import numpy as np
 from datetime import timedelta
 from fpdf import FPDF
 
@@ -7,7 +9,7 @@ from fpdf import FPDF
 st.set_page_config(page_title="Aşı Dolabı Analiz Raporu", layout="wide")
 
 st.title("🌡️ Detaylı Aşı/İlaç Dolabı Sıcaklık Analizi")
-st.markdown("Yüklenen sensör verilerini ve rapor başlığındaki tarihleri analiz eder; kesintileri ve ihlalleri profesyonel PDF raporu olarak sunar.")
+st.markdown("Yüklenen sensör verilerini analiz eder; kesintileri, ihlalleri ve **uzun vadeli trendleri** raporlar.")
 
 # --- Ayarlar Sidebar ---
 st.sidebar.header("⚙️ Analiz Ayarları")
@@ -41,7 +43,7 @@ def parse_metadata_date(date_str):
         return None
 
 def format_duration(td):
-    """Timedelta'yı okunabilir string'e çevirir (Milisaniyesiz)"""
+    """Timedelta'yı okunabilir string'e çevirir"""
     return str(td).split('.')[0]
 
 # --- PDF Sınıfı ---
@@ -165,7 +167,6 @@ def analyze_data(file):
         df['Timestamp'] = pd.to_datetime(df[time_col], dayfirst=True, errors='coerce')
         df = df.dropna(subset=['Timestamp']).sort_values('Timestamp')
 
-        # Sıcaklık Dönüşümü (NaN değerleri korur)
         if df[temp_col].dtype == object:
             df['Temp'] = df[temp_col].str.replace(',', '.').astype(float)
         else:
@@ -204,11 +205,10 @@ if uploaded_file is not None:
         gap_threshold = timedelta(hours=gap_threshold_hours)
         all_gaps = []
 
-        # A) Zaman Farkı Kaynaklı Kesintiler (Satır Eksikliği)
+        # A) Zaman Farkı
         df['TimeDiff'] = df['Timestamp'].diff()
         df['PrevTimestamp'] = df['Timestamp'].shift(1)
         internal_gaps = df[df['TimeDiff'] >= gap_threshold].copy()
-        
         for _, row in internal_gaps.iterrows():
             all_gaps.append({
                 "Tip": "Veri Arası Bosluk",
@@ -217,7 +217,7 @@ if uploaded_file is not None:
                 "Sure": row['TimeDiff']
             })
 
-        # B) Başlangıç Kaybı
+        # B) Başlangıç/Bitiş Kaybı
         if meta_start_dt:
             first_data_time = df['Timestamp'].min()
             start_diff = first_data_time - meta_start_dt
@@ -229,7 +229,6 @@ if uploaded_file is not None:
                     "Sure": start_diff
                 })
 
-        # C) Bitiş Kaybı
         if meta_end_dt:
             last_data_time = df['Timestamp'].max()
             end_diff = meta_end_dt - last_data_time
@@ -241,53 +240,34 @@ if uploaded_file is not None:
                     "Sure": end_diff
                 })
         
-        # D) Sıcaklık Verisi Yok (Boş Hücreler)
-        # Temp sütunu NaN olan ama Timestamp olan satırlar
-        missing_temps = df[df['Temp'].isna()].copy()
-        if not missing_temps.empty:
-            # Ardışık boş satırları grupla
-            missing_temps['Group'] = (missing_temps['Timestamp'].diff() > pd.Timedelta('5min')).cumsum() 
-            # Not: Yukarıdaki basit gruplama yerine index bazlı gruplama daha sağlıklıdır.
-            
-            # Ana DF üzerinde 'IsMissing' ile gruplama yapalım:
-            df['IsMissingTemp'] = df['Temp'].isna()
-            df['MissingGroup'] = (df['IsMissingTemp'] != df['IsMissingTemp'].shift()).cumsum()
-            
-            # Sadece True (Eksik) olan grupları al
-            for _, group in df[df['IsMissingTemp']].groupby('MissingGroup'):
-                s_t = group['Timestamp'].min()
-                e_t = group['Timestamp'].max()
-                dur = e_t - s_t
-                
-                # Eğer tek satırsa (dur=0), süreyi belirtmek için sembolik bir gösterim veya 0 bırakılabilir.
-                # Kullanıcının seçtiği EŞİK DEĞERİNE göre filtreleyelim.
-                # Tek bir boş satır genellikle 2 saati geçmez. Ancak kullanıcı eşiği 0 yaparsa görmeli.
-                if dur >= gap_threshold:
-                    all_gaps.append({
-                        "Tip": "Sicaklik Verisi Yok",
-                        "Baslangic": s_t,
-                        "Bitis": e_t,
-                        "Sure": dur
-                    })
+        # C) Sıcaklık Verisi Yok (Boş Hücre)
+        df['IsMissingTemp'] = df['Temp'].isna()
+        df['MissingGroup'] = (df['IsMissingTemp'] != df['IsMissingTemp'].shift()).cumsum()
+        for _, group in df[df['IsMissingTemp']].groupby('MissingGroup'):
+            s_t = group['Timestamp'].min()
+            e_t = group['Timestamp'].max()
+            dur = e_t - s_t
+            if dur >= gap_threshold:
+                all_gaps.append({
+                    "Tip": "Sicaklik Verisi Yok",
+                    "Baslangic": s_t,
+                    "Bitis": e_t,
+                    "Sure": dur
+                })
         
-        # Kesinti Listesini Oluştur ve Sırala
+        # Kesinti DF Hazırla
         if all_gaps:
-            df_gaps_report = pd.DataFrame(all_gaps)
-            # Tarihe göre sırala
-            df_gaps_report = df_gaps_report.sort_values('Baslangic')
-            
-            # Formatlama
+            df_gaps_report = pd.DataFrame(all_gaps).sort_values('Baslangic')
             df_gaps_report['Baslangic'] = df_gaps_report['Baslangic'].apply(lambda x: x.strftime('%d.%m.%Y %H:%M:%S'))
             df_gaps_report['Bitis'] = df_gaps_report['Bitis'].apply(lambda x: x.strftime('%d.%m.%Y %H:%M:%S'))
             df_gaps_report['Sure'] = df_gaps_report['Sure'].astype(str).apply(lambda x: x.split('.')[0])
-            
             df_gaps_report = df_gaps_report[["Tip", "Baslangic", "Bitis", "Sure"]]
         else:
             df_gaps_report = pd.DataFrame()
 
 
         # --- 2. SICAKLIK İHLALİ ve ÖZET ---
-        df_clean = df.dropna(subset=['Temp']).copy() # İhlal hesabı için boş sıcaklıkları çıkar
+        df_clean = df.dropna(subset=['Temp']).copy()
         
         df_clean['Status'] = 0 
         df_clean.loc[df_clean['Temp'] < min_temp_limit, 'Status'] = -1
@@ -295,7 +275,6 @@ if uploaded_file is not None:
         df_clean['Group'] = (df_clean['Status'] != df_clean['Status'].shift()).cumsum()
         
         violation_events = []
-        
         total_max_duration = timedelta(0)
         total_min_duration = timedelta(0)
         global_max_val = None
@@ -304,11 +283,9 @@ if uploaded_file is not None:
         for _, group in df_clean[df_clean['Status'] != 0].groupby('Group'):
             status = group['Status'].iloc[0]
             v_type = "Min Alti" if status == -1 else "Max Ustu"
-            
             s_t = group['Timestamp'].min()
             e_t = group['Timestamp'].max()
             dur = e_t - s_t
-            
             extreme = group['Temp'].min() if status == -1 else group['Temp'].max()
             
             if status == 1: 
@@ -327,7 +304,6 @@ if uploaded_file is not None:
             })
         
         df_violations = pd.DataFrame(violation_events)
-        
         summary_stats = {
             "max_dur": format_duration(total_max_duration) if total_max_duration > timedelta(0) else "-",
             "max_val": f"{global_max_val} C" if global_max_val is not None else "-",
@@ -335,8 +311,24 @@ if uploaded_file is not None:
             "min_val": f"{global_min_val} C" if global_min_val is not None else "-"
         }
 
-        # --- SEKMELER ---
-        tab1, tab2 = st.tabs(["⚠️ Veri Kesintileri", "🚨 Sıcaklık İhlalleri"])
+        # --- 3. İSTATİSTİKSEL ANALİZ (YENİ) ---
+        # Günlük Gruplama
+        df_clean['Date'] = df_clean['Timestamp'].dt.date
+        daily_stats = df_clean.groupby('Date')['Temp'].agg(['mean', 'std', 'min', 'max']).reset_index()
+        daily_stats.columns = ['Tarih', 'Ortalama', 'StdSapma', 'Min', 'Max']
+        
+        # Trend Hesabı (Basit Lineer Eğilim)
+        # Tarihleri ordinal sayıya çevirip polyfit yapalım
+        if len(daily_stats) > 1:
+            x = np.arange(len(daily_stats))
+            y = daily_stats['Ortalama'].values
+            z = np.polyfit(x, y, 1) # 1. derece (doğrusal)
+            slope = z[0] # Eğim
+        else:
+            slope = 0
+
+        # --- ARAYÜZ SEKMELERİ ---
+        tab1, tab2, tab3 = st.tabs(["⚠️ Veri Kesintileri", "🚨 Sıcaklık İhlalleri", "📊 İstatistik & Trend"])
 
         with tab1:
             st.subheader(f"Veri Kesintisi Raporu (> {gap_threshold_hours} Saat)")
@@ -349,7 +341,6 @@ if uploaded_file is not None:
 
         with tab2:
             st.subheader("Sıcaklık İhlal Raporu")
-            
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Toplam Üst Limit Aşım", summary_stats["max_dur"])
             col2.metric("En Yüksek Sıcaklık", summary_stats["max_val"])
@@ -363,6 +354,58 @@ if uploaded_file is not None:
                 st.download_button("📄 İhlal Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal_raporu.pdf", "application/pdf")
             else:
                 st.success("Herhangi bir sıcaklık ihlali bulunamadı.")
+        
+        with tab3:
+            st.subheader("Kestirimci Bakım & İstatistik Analizi")
+            
+            # Üst Bilgi Kartları
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Genel Ortalama Sıcaklık", f"{df_clean['Temp'].mean():.2f} °C")
+            c2.metric("Genel Standart Sapma", f"{df_clean['Temp'].std():.2f} °C", help="Yüksek değer dalgalanmayı gösterir.")
+            
+            # Trend Yorumu
+            trend_msg = "Veri yetersiz."
+            trend_color = "off"
+            if len(daily_stats) > 1:
+                if slope > 0.05:
+                    trend_msg = f"⚠️ DİKKAT: Günlük ortalama her gün yaklaşık {slope:.3f}°C artıyor. Motor/kompresör performans kaybı olabilir."
+                    trend_color = "inverse"
+                elif slope < -0.05:
+                    trend_msg = f"ℹ️ Bilgi: Günlük ortalama her gün yaklaşık {abs(slope):.3f}°C düşüyor."
+                    trend_color = "normal"
+                else:
+                    trend_msg = "✅ Durum Stabil: Anlamlı bir sıcaklık artış/azalış trendi yok."
+                    trend_color = "normal"
+            c3.metric("Sıcaklık Eğilimi (Trend)", f"{slope:.4f}", delta=trend_msg, delta_color=trend_color)
+
+            if slope > 0.05:
+                st.warning(trend_msg)
+            else:
+                st.info(trend_msg)
+                
+            st.divider()
+
+            col_g1, col_g2 = st.columns(2)
+            
+            with col_g1:
+                st.markdown("#### 📅 Günlük Ortalama Sıcaklık")
+                fig_avg = px.bar(daily_stats, x='Tarih', y='Ortalama', 
+                                 title="Günlük Ortalama Sıcaklık Değişimi",
+                                 text_auto='.2f', color='Ortalama', color_continuous_scale='Bluered')
+                # Trend çizgisi ekleyelim
+                fig_avg.add_scatter(x=daily_stats['Tarih'], y=daily_stats['Ortalama'], mode='lines', name='Trend', line=dict(color='black', dash='dash'))
+                st.plotly_chart(fig_avg, use_container_width=True)
+                
+            with col_g2:
+                st.markdown("#### 📉 Stabilite Analizi (Standart Sapma)")
+                st.caption("Standart sapmanın yüksek olması, o gün dolabın ısısının çok sık değiştiğini (kapak açılması, arıza vb.) gösterir.")
+                fig_std = px.line(daily_stats, x='Tarih', y='StdSapma', markers=True, 
+                                  title="Günlük Sıcaklık Dalgalanması (Standart Sapma)")
+                fig_std.update_traces(line_color='#FF5733')
+                st.plotly_chart(fig_std, use_container_width=True)
+
+            st.markdown("#### 📋 Günlük İstatistik Tablosu")
+            st.dataframe(daily_stats, use_container_width=True)
 
 else:
     st.info("Lütfen CSV dosyasını yükleyin.")
