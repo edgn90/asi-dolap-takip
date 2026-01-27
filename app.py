@@ -34,13 +34,15 @@ def tr_fix(text):
     return text
 
 def parse_metadata_date(date_str):
-    """Farklı formatlardaki tarihleri (/, ., -) datetime'a çevirir"""
     try:
-        # Olası temizlik
         date_str = date_str.strip().replace('"', '').replace("'", "")
         return pd.to_datetime(date_str, dayfirst=True)
     except:
         return None
+
+def format_duration(td):
+    """Timedelta'yı okunabilir string'e çevirir (Milisaniyesiz)"""
+    return str(td).split('.')[0]
 
 # --- PDF Sınıfı ---
 class ReportPDF(FPDF):
@@ -63,7 +65,6 @@ class ReportPDF(FPDF):
         self.cell(0, 6, tr_fix(self.metadata.get('Stok', '-')), ln=True)
         self.cell(40, 6, tr_fix("Rapor Tarih Aralığı:"), border=0)
         
-        # Metadata'daki tarihleri kullan, yoksa - koy
         start_str = str(self.metadata.get('Baslangic', '-'))
         end_str = str(self.metadata.get('Bitis', '-'))
         self.cell(0, 6, f"{start_str} -- {end_str}", ln=True)
@@ -76,6 +77,31 @@ class ReportPDF(FPDF):
         self.set_y(-15)
         self.set_font('Arial', 'I', 8)
         self.cell(0, 10, f'Sayfa {self.page_no()}', 0, 0, 'C')
+
+    def add_violation_summary(self, summary_data):
+        """İhlal Raporu için PDF'e özel özet tablo ekler"""
+        self.set_font('Arial', 'B', 11)
+        self.cell(0, 8, tr_fix("IHLAL OZET TABLOSU"), ln=True)
+        
+        self.set_font('Arial', '', 10)
+        # Tablo Başlıkları
+        col_w = 45
+        self.cell(col_w, 7, tr_fix("Kriter"), 1)
+        self.cell(col_w, 7, tr_fix("Toplam Sure"), 1)
+        self.cell(col_w, 7, tr_fix("En Uc Deger"), 1)
+        self.ln()
+        
+        # Üst Limit Satırı
+        self.cell(col_w, 7, tr_fix("Ust Limit Asimi"), 1)
+        self.cell(col_w, 7, tr_fix(summary_data['max_dur']), 1)
+        self.cell(col_w, 7, tr_fix(summary_data['max_val']), 1)
+        self.ln()
+        
+        # Alt Limit Satırı
+        self.cell(col_w, 7, tr_fix("Alt Limit Asimi"), 1)
+        self.cell(col_w, 7, tr_fix(summary_data['min_dur']), 1)
+        self.cell(col_w, 7, tr_fix(summary_data['min_val']), 1)
+        self.ln(10) # Tablo sonrası boşluk
 
     def add_table(self, df):
         if df.empty:
@@ -102,17 +128,13 @@ def extract_metadata(file):
     file.seek(0)
     meta = {}
     try:
-        # ISO-8859-9 (Türkçe) ile okumayı dene
-        lines = [file.readline().decode('ISO-8859-9').strip() for _ in range(HEADER_ROW + 2)] # Biraz fazla oku
+        lines = [file.readline().decode('ISO-8859-9').strip() for _ in range(HEADER_ROW + 2)]
         for line in lines:
             parts = line.split(',')
             clean_parts = [p.strip().replace('"', '') for p in parts if p.strip()]
-            
             if len(clean_parts) >= 2:
                 key = clean_parts[0]
                 val = clean_parts[1]
-                
-                # Esnek anahtar kelime kontrolü
                 if "Birim" in key and "Stok" not in key: meta['Birim'] = val
                 elif "Depo" in key: meta['Depo'] = val
                 elif "Stok" in key: meta['Stok'] = val
@@ -157,9 +179,14 @@ def analyze_data(file):
     except Exception:
         return None, None
 
-def create_pdf_bytes(df, metadata, title):
+def create_pdf_bytes(df, metadata, title, violation_summary=None):
     pdf = ReportPDF(metadata, title)
     pdf.add_page()
+    
+    # Eğer ihlal özeti varsa (summary_data doluysa) tablo öncesi ekle
+    if violation_summary:
+        pdf.add_violation_summary(violation_summary)
+        
     pdf.add_table(df)
     return pdf.output(dest='S').encode('latin-1', 'ignore')
 
@@ -168,40 +195,22 @@ if uploaded_file is not None:
     df, metadata = analyze_data(uploaded_file)
     
     if df is not None:
-        # --- Metadata Tarihleri Parse Et ---
         meta_start_dt = parse_metadata_date(metadata.get('Baslangic', ''))
         meta_end_dt = parse_metadata_date(metadata.get('Bitis', ''))
         
-        # Eğer metadata'dan tarih okunamadıysa, veri setindeki min/max kullanılır
-        # Ancak kullanıcı açıkça Header'ı istediği için bunu öncelikli tutuyoruz.
-        # Raporlama için kullanılacak stringler:
         disp_start = meta_start_dt.strftime('%d.%m.%Y %H:%M') if meta_start_dt else "Belirtilmemiş"
         disp_end = meta_end_dt.strftime('%d.%m.%Y %H:%M') if meta_end_dt else "Belirtilmemiş"
 
         st.info(f"""
         **Birim:** {metadata.get('Birim','-')} | **Depo:** {metadata.get('Depo','-')}
-        
         📅 **Rapor Tarih Aralığı (Header):** {disp_start} — {disp_end}
         """)
 
-        # --- 1. KESİNTİ ANALİZİ ---
+        # 1. KESİNTİ ANALİZİ (Header Dahil)
         gap_threshold = timedelta(hours=gap_threshold_hours)
         all_gaps = []
 
-        # A) Veri İçindeki Boşluklar (Internal Gaps)
         df['TimeDiff'] = df['Timestamp'].diff()
-        internal_gaps = df[df['TimeDiff'] >= gap_threshold].copy()
-        
-        for idx, row in internal_gaps.iterrows():
-            prev_row = df.loc[idx-1] # Pandas indexlemesine dikkat (iloc değil loc, sort edilmişse)
-            # Ancak diff() alındığında indexler korunur. sort_values sonrası index resetlenmediyse:
-            # Garanti olsun diye iloc ile alalım:
-            # Row'un sırasını bulmamız lazım.
-            
-            # Daha güvenli yöntem: Shiftlenmiş kolon
-            pass 
-        
-        # Pandas ile daha temiz yapalım:
         df['PrevTimestamp'] = df['Timestamp'].shift(1)
         internal_gaps = df[df['TimeDiff'] >= gap_threshold].copy()
         
@@ -213,19 +222,17 @@ if uploaded_file is not None:
                 "Sure": row['TimeDiff']
             })
 
-        # B) Başlangıç Boşluğu (Header Start vs First Data)
         if meta_start_dt:
             first_data_time = df['Timestamp'].min()
             start_diff = first_data_time - meta_start_dt
             if start_diff >= gap_threshold:
-                all_gaps.insert(0, { # En başa ekle
+                all_gaps.insert(0, {
                     "Tip": "Başlangıç Kaybı",
                     "Baslangic": meta_start_dt,
                     "Bitis": first_data_time,
                     "Sure": start_diff
                 })
 
-        # C) Bitiş Boşluğu (Last Data vs Header End)
         if meta_end_dt:
             last_data_time = df['Timestamp'].max()
             end_diff = meta_end_dt - last_data_time
@@ -237,27 +244,30 @@ if uploaded_file is not None:
                     "Sure": end_diff
                 })
 
-        # DataFrame'e çevir
         if all_gaps:
             df_gaps_report = pd.DataFrame(all_gaps)
-            # Formatlama
             df_gaps_report['Baslangic'] = df_gaps_report['Baslangic'].apply(lambda x: x.strftime('%d.%m.%Y %H:%M:%S'))
             df_gaps_report['Bitis'] = df_gaps_report['Bitis'].apply(lambda x: x.strftime('%d.%m.%Y %H:%M:%S'))
-            df_gaps_report['Sure'] = df_gaps_report['Sure'].astype(str)
-            # Sütun sırası
+            df_gaps_report['Sure'] = df_gaps_report['Sure'].astype(str).apply(lambda x: x.split('.')[0])
             df_gaps_report = df_gaps_report[["Tip", "Baslangic", "Bitis", "Sure"]]
         else:
             df_gaps_report = pd.DataFrame()
 
 
-        # --- 2. SICAKLIK İHLALİ ANALİZİ ---
-        # Sadece mevcut veriler üzerinde yapılabilir
+        # 2. SICAKLIK İHLALİ ve ÖZET HESAPLAMA
         df['Status'] = 0 
         df.loc[df['Temp'] < min_temp_limit, 'Status'] = -1
         df.loc[df['Temp'] > max_temp_limit, 'Status'] = 1
         df['Group'] = (df['Status'] != df['Status'].shift()).cumsum()
         
         violation_events = []
+        
+        # İstatistik Değişkenleri
+        total_max_duration = timedelta(0)
+        total_min_duration = timedelta(0)
+        global_max_val = None
+        global_min_val = None
+        
         for _, group in df[df['Status'] != 0].groupby('Group'):
             status = group['Status'].iloc[0]
             v_type = "Min Alti" if status == -1 else "Max Ustu"
@@ -266,14 +276,36 @@ if uploaded_file is not None:
             e_t = group['Timestamp'].max()
             dur = e_t - s_t
             
+            # En uç değer
+            extreme = group['Temp'].min() if status == -1 else group['Temp'].max()
+            
+            # İstatistik Güncelle
+            if status == 1: # Max
+                total_max_duration += dur
+                if global_max_val is None or extreme > global_max_val:
+                    global_max_val = extreme
+            else: # Min
+                total_min_duration += dur
+                if global_min_val is None or extreme < global_min_val:
+                    global_min_val = extreme
+
             violation_events.append({
                 "Tur": v_type,
                 "Baslangic": s_t.strftime('%d.%m.%Y %H:%M:%S'),
                 "Bitis": e_t.strftime('%d.%m.%Y %H:%M:%S'),
-                "Sure": str(dur),
-                "En Uc Deger": group['Temp'].min() if status == -1 else group['Temp'].max()
+                "Sure": format_duration(dur),
+                "En Uc Deger": extreme
             })
+        
         df_violations = pd.DataFrame(violation_events)
+        
+        # Özet Sözlük (PDF ve Ekran için)
+        summary_stats = {
+            "max_dur": format_duration(total_max_duration) if total_max_duration > timedelta(0) else "-",
+            "max_val": f"{global_max_val} °C" if global_max_val is not None else "-",
+            "min_dur": format_duration(total_min_duration) if total_min_duration > timedelta(0) else "-",
+            "min_val": f"{global_min_val} °C" if global_min_val is not None else "-"
+        }
 
         # --- SEKMELER ---
         tab1, tab2 = st.tabs(["⚠️ Veri Kesintileri", "🚨 Sıcaklık İhlalleri"])
@@ -282,29 +314,28 @@ if uploaded_file is not None:
             st.subheader(f"Veri Kesintisi Raporu (> {gap_threshold_hours} Saat)")
             if not df_gaps_report.empty:
                 st.dataframe(df_gaps_report, use_container_width=True)
-                
                 pdf_data = create_pdf_bytes(df_gaps_report, metadata, "Veri Kesintisi Raporu")
-                st.download_button(
-                    label="📄 Kesinti Raporunu PDF İndir",
-                    data=pdf_data,
-                    file_name="veri_kesinti_raporu.pdf",
-                    mime="application/pdf"
-                )
+                st.download_button("📄 Kesinti Raporunu PDF İndir", pdf_data, "veri_kesinti_raporu.pdf", "application/pdf")
             else:
                 st.success("Belirlenen kriterlerde (Header Tarihleri dahil) kesinti bulunamadı.")
 
         with tab2:
             st.subheader("Sıcaklık İhlal Raporu")
+            
+            # ÖZET KARTLAR (EKRAN)
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Toplam Üst Limit Aşım Süresi", summary_stats["max_dur"])
+            col2.metric("En Yüksek Sıcaklık", summary_stats["max_val"])
+            col3.metric("Toplam Alt Limit Aşım Süresi", summary_stats["min_dur"])
+            col4.metric("En Düşük Sıcaklık", summary_stats["min_val"])
+            
+            st.divider()
+            
             if not df_violations.empty:
                 st.dataframe(df_violations, use_container_width=True)
-                
-                pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu")
-                st.download_button(
-                    label="📄 İhlal Raporunu PDF İndir",
-                    data=pdf_data_v,
-                    file_name="sicaklik_ihlal_raporu.pdf",
-                    mime="application/pdf"
-                )
+                # Özet bilgisini PDF fonksiyonuna gönderiyoruz
+                pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu", violation_summary=summary_stats)
+                st.download_button("📄 İhlal Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal_raporu.pdf", "application/pdf")
             else:
                 st.success("Herhangi bir sıcaklık ihlali bulunamadı.")
 
