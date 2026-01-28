@@ -9,7 +9,7 @@ from fpdf import FPDF
 st.set_page_config(page_title="Aşı Dolabı Analiz Raporu", layout="wide")
 
 st.title("🌡️ Detaylı Aşı/İlaç Dolabı Sıcaklık Analizi")
-st.markdown("Yüklenen sensör verilerini analiz eder; kesintileri, ihlalleri ve **uzun vadeli trendleri** raporlar.")
+st.markdown("Yüklenen sensör verilerini analiz eder; kesintileri, ihlalleri, trendleri ve **imha/kullanım durumunu** raporlar.")
 
 # --- Ayarlar Sidebar ---
 st.sidebar.header("⚙️ Analiz Ayarları")
@@ -99,7 +99,13 @@ class ReportPDF(FPDF):
         self.cell(col_w, 7, tr_fix("Alt Limit Asimi"), 1)
         self.cell(col_w, 7, tr_fix(summary_data['min_dur']), 1)
         self.cell(col_w, 7, tr_fix(summary_data['min_val']), 1)
-        self.ln(10)
+        self.ln(5)
+        
+        # --- KARAR BÖLÜMÜ (PDF) ---
+        decision = summary_data.get('decision', '-')
+        self.set_font('Arial', 'B', 12)
+        self.cell(0, 12, tr_fix(f"KARAR: {decision}"), border=1, ln=True, align='C')
+        self.ln(5)
 
     def add_table(self, df):
         if df.empty:
@@ -240,7 +246,7 @@ if uploaded_file is not None:
                     "Sure": end_diff
                 })
         
-        # C) Sıcaklık Verisi Yok (Boş Hücre)
+        # C) Sıcaklık Verisi Yok
         df['IsMissingTemp'] = df['Temp'].isna()
         df['MissingGroup'] = (df['IsMissingTemp'] != df['IsMissingTemp'].shift()).cumsum()
         for _, group in df[df['IsMissingTemp']].groupby('MissingGroup'):
@@ -255,7 +261,6 @@ if uploaded_file is not None:
                     "Sure": dur
                 })
         
-        # Kesinti DF Hazırla
         if all_gaps:
             df_gaps_report = pd.DataFrame(all_gaps).sort_values('Baslangic')
             df_gaps_report['Baslangic'] = df_gaps_report['Baslangic'].apply(lambda x: x.strftime('%d.%m.%Y %H:%M:%S'))
@@ -266,7 +271,7 @@ if uploaded_file is not None:
             df_gaps_report = pd.DataFrame()
 
 
-        # --- 2. SICAKLIK İHLALİ ve ÖZET ---
+        # --- 2. SICAKLIK İHLALİ ve KARAR MEKANİZMASI ---
         df_clean = df.dropna(subset=['Temp']).copy()
         
         df_clean['Status'] = 0 
@@ -303,27 +308,40 @@ if uploaded_file is not None:
                 "En Uc Deger": extreme
             })
         
+        # --- KARAR MANTIĞI ---
+        # Kriterler: Süre >= 8 Saat VE MaxSıcaklık >= 15°C -> İmha
+        # Kriterler: Süre < 8 Saat VE MaxSıcaklık < 15°C -> Kullanılabilir
+        
+        decision_msg = "MANUEL KONTROL GEREKLI (Ara Deger)"
+        
+        # Max limit ihlali yoksa veya veri yoksa güvenli kabul edilir (Varsayılan: <8 Saat, <15°C)
+        check_dur_hours = total_max_duration.total_seconds() / 3600
+        check_max_val = global_max_val if global_max_val is not None else 0 
+        
+        if check_dur_hours >= 8 and check_max_val >= 15:
+            decision_msg = "IMHA ONERILIR"
+        elif check_dur_hours < 8 and check_max_val < 15:
+            decision_msg = "KULLANILABILIR ONERILIR"
+        
         df_violations = pd.DataFrame(violation_events)
         summary_stats = {
             "max_dur": format_duration(total_max_duration) if total_max_duration > timedelta(0) else "-",
             "max_val": f"{global_max_val} C" if global_max_val is not None else "-",
             "min_dur": format_duration(total_min_duration) if total_min_duration > timedelta(0) else "-",
-            "min_val": f"{global_min_val} C" if global_min_val is not None else "-"
+            "min_val": f"{global_min_val} C" if global_min_val is not None else "-",
+            "decision": decision_msg
         }
 
-        # --- 3. İSTATİSTİKSEL ANALİZ (YENİ) ---
-        # Günlük Gruplama
+        # --- 3. İSTATİSTİK ANALİZ ---
         df_clean['Date'] = df_clean['Timestamp'].dt.date
         daily_stats = df_clean.groupby('Date')['Temp'].agg(['mean', 'std', 'min', 'max']).reset_index()
         daily_stats.columns = ['Tarih', 'Ortalama', 'StdSapma', 'Min', 'Max']
         
-        # Trend Hesabı (Basit Lineer Eğilim)
-        # Tarihleri ordinal sayıya çevirip polyfit yapalım
         if len(daily_stats) > 1:
             x = np.arange(len(daily_stats))
             y = daily_stats['Ortalama'].values
-            z = np.polyfit(x, y, 1) # 1. derece (doğrusal)
-            slope = z[0] # Eğim
+            z = np.polyfit(x, y, 1)
+            slope = z[0]
         else:
             slope = 0
 
@@ -341,70 +359,65 @@ if uploaded_file is not None:
 
         with tab2:
             st.subheader("Sıcaklık İhlal Raporu")
+            
+            # KARAR KARTLARI
+            st.markdown("### 🚦 Otomatik Değerlendirme")
+            if "IMHA" in decision_msg:
+                st.error(f"🚨 **KARAR:** {decision_msg}")
+            elif "KULLANILABILIR" in decision_msg:
+                st.success(f"✅ **KARAR:** {decision_msg}")
+            else:
+                st.warning(f"⚠️ **KARAR:** {decision_msg}")
+                
+            st.divider()
+            
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Toplam Üst Limit Aşım", summary_stats["max_dur"])
             col2.metric("En Yüksek Sıcaklık", summary_stats["max_val"])
             col3.metric("Toplam Alt Limit Aşım", summary_stats["min_dur"])
             col4.metric("En Düşük Sıcaklık", summary_stats["min_val"])
-            st.divider()
             
             if not df_violations.empty:
                 st.dataframe(df_violations, use_container_width=True)
                 pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu", violation_summary=summary_stats)
                 st.download_button("📄 İhlal Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal_raporu.pdf", "application/pdf")
             else:
-                st.success("Herhangi bir sıcaklık ihlali bulunamadı.")
+                st.info("İhlal tablosu boş (limitler içinde).")
+                # İhlal olmasa bile karar raporu basılabilmesi için
+                pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu", violation_summary=summary_stats)
+                st.download_button("📄 Özet Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal_raporu.pdf", "application/pdf")
         
         with tab3:
             st.subheader("Kestirimci Bakım & İstatistik Analizi")
-            
-            # Üst Bilgi Kartları
             c1, c2, c3 = st.columns(3)
             c1.metric("Genel Ortalama Sıcaklık", f"{df_clean['Temp'].mean():.2f} °C")
-            c2.metric("Genel Standart Sapma", f"{df_clean['Temp'].std():.2f} °C", help="Yüksek değer dalgalanmayı gösterir.")
+            c2.metric("Genel Standart Sapma", f"{df_clean['Temp'].std():.2f} °C")
             
-            # Trend Yorumu
             trend_msg = "Veri yetersiz."
             trend_color = "off"
             if len(daily_stats) > 1:
                 if slope > 0.05:
-                    trend_msg = f"⚠️ DİKKAT: Günlük ortalama her gün yaklaşık {slope:.3f}°C artıyor. Motor/kompresör performans kaybı olabilir."
+                    trend_msg = f"⚠️ ARTIŞ: Günlük ortalama {slope:.3f}°C artıyor."
                     trend_color = "inverse"
                 elif slope < -0.05:
-                    trend_msg = f"ℹ️ Bilgi: Günlük ortalama her gün yaklaşık {abs(slope):.3f}°C düşüyor."
+                    trend_msg = f"ℹ️ AZALIŞ: Günlük ortalama {abs(slope):.3f}°C düşüyor."
                     trend_color = "normal"
                 else:
-                    trend_msg = "✅ Durum Stabil: Anlamlı bir sıcaklık artış/azalış trendi yok."
+                    trend_msg = "✅ STABİL"
                     trend_color = "normal"
             c3.metric("Sıcaklık Eğilimi (Trend)", f"{slope:.4f}", delta=trend_msg, delta_color=trend_color)
 
-            if slope > 0.05:
-                st.warning(trend_msg)
-            else:
-                st.info(trend_msg)
-                
-            st.divider()
-
             col_g1, col_g2 = st.columns(2)
-            
             with col_g1:
-                st.markdown("#### 📅 Günlük Ortalama Sıcaklık")
-                fig_avg = px.bar(daily_stats, x='Tarih', y='Ortalama', 
-                                 title="Günlük Ortalama Sıcaklık Değişimi",
-                                 text_auto='.2f', color='Ortalama', color_continuous_scale='Bluered')
-                # Trend çizgisi ekleyelim
-                fig_avg.add_scatter(x=daily_stats['Tarih'], y=daily_stats['Ortalama'], mode='lines', name='Trend', line=dict(color='black', dash='dash'))
+                st.markdown("#### 📅 Günlük Ortalama")
+                fig_avg = px.bar(daily_stats, x='Tarih', y='Ortalama', color='Ortalama', color_continuous_scale='Bluered')
                 st.plotly_chart(fig_avg, use_container_width=True)
-                
             with col_g2:
-                st.markdown("#### 📉 Stabilite Analizi (Standart Sapma)")
-                st.caption("Standart sapmanın yüksek olması, o gün dolabın ısısının çok sık değiştiğini (kapak açılması, arıza vb.) gösterir.")
-                fig_std = px.line(daily_stats, x='Tarih', y='StdSapma', markers=True, 
-                                  title="Günlük Sıcaklık Dalgalanması (Standart Sapma)")
+                st.markdown("#### 📉 Stabilite (Std. Sapma)")
+                fig_std = px.line(daily_stats, x='Tarih', y='StdSapma', markers=True)
                 fig_std.update_traces(line_color='#FF5733')
                 st.plotly_chart(fig_std, use_container_width=True)
 
-            st.markdown("#### 📋 Günlük İstatistik Tablosu")
             st.dataframe(daily_stats, use_container_width=True)
 
 else:
