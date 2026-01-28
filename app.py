@@ -9,7 +9,7 @@ from fpdf import FPDF
 st.set_page_config(page_title="Aşı Dolabı Analiz Raporu", layout="wide")
 
 st.title("🌡️ Detaylı Aşı/İlaç Dolabı Sıcaklık Analizi")
-st.markdown("Yüklenen sensör verilerini analiz eder; kesintileri, ihlalleri, trendleri ve **imha/kullanım durumunu** raporlar.")
+st.markdown("Yüklenen sensör verilerini analiz eder; kesintileri, ihlalleri, trendleri ve **otomatik karar önerisini** raporlar.")
 
 # --- Ayarlar Sidebar ---
 st.sidebar.header("⚙️ Analiz Ayarları")
@@ -104,6 +104,7 @@ class ReportPDF(FPDF):
         # --- KARAR BÖLÜMÜ (PDF) ---
         decision = summary_data.get('decision', '-')
         self.set_font('Arial', 'B', 12)
+        # Karar kutusu
         self.cell(0, 12, tr_fix(f"KARAR: {decision}"), border=1, ln=True, align='C')
         self.ln(5)
 
@@ -173,6 +174,7 @@ def analyze_data(file):
         df['Timestamp'] = pd.to_datetime(df[time_col], dayfirst=True, errors='coerce')
         df = df.dropna(subset=['Timestamp']).sort_values('Timestamp')
 
+        # Sıcaklık string ise floata çevir (NaN kalabilir)
         if df[temp_col].dtype == object:
             df['Temp'] = df[temp_col].str.replace(',', '.').astype(float)
         else:
@@ -223,7 +225,7 @@ if uploaded_file is not None:
                 "Sure": row['TimeDiff']
             })
 
-        # B) Başlangıç/Bitiş Kaybı
+        # B) Başlangıç/Bitiş Kaybı (Header Tarihlerine Göre)
         if meta_start_dt:
             first_data_time = df['Timestamp'].min()
             start_diff = first_data_time - meta_start_dt
@@ -246,7 +248,7 @@ if uploaded_file is not None:
                     "Sure": end_diff
                 })
         
-        # C) Sıcaklık Verisi Yok
+        # C) Sıcaklık Verisi Yok (Boş Hücre)
         df['IsMissingTemp'] = df['Temp'].isna()
         df['MissingGroup'] = (df['IsMissingTemp'] != df['IsMissingTemp'].shift()).cumsum()
         for _, group in df[df['IsMissingTemp']].groupby('MissingGroup'):
@@ -271,9 +273,20 @@ if uploaded_file is not None:
             df_gaps_report = pd.DataFrame()
 
 
-        # --- 2. SICAKLIK İHLALİ ve KARAR MEKANİZMASI ---
+        # --- 2. SICAKLIK İHLALİ ve KARAR ---
         df_clean = df.dropna(subset=['Temp']).copy()
         
+        # 0 Derece Altı Özel Analiz (Karar İçin)
+        df_clean['IsFreezing'] = df_clean['Temp'] < 0
+        df_clean['FreezeGroup'] = (df_clean['IsFreezing'] != df_clean['IsFreezing'].shift()).cumsum()
+        total_below_zero_duration = timedelta(0)
+        
+        for _, grp in df_clean[df_clean['IsFreezing']].groupby('FreezeGroup'):
+            s = grp['Timestamp'].min()
+            e = grp['Timestamp'].max()
+            total_below_zero_duration += (e - s)
+
+        # Normal İhlal Analizi
         df_clean['Status'] = 0 
         df_clean.loc[df_clean['Temp'] < min_temp_limit, 'Status'] = -1
         df_clean.loc[df_clean['Temp'] > max_temp_limit, 'Status'] = 1
@@ -309,17 +322,23 @@ if uploaded_file is not None:
             })
         
         # --- KARAR MANTIĞI ---
-        # Kriterler: Süre >= 8 Saat VE MaxSıcaklık >= 15°C -> İmha
-        # Kriterler: Süre < 8 Saat VE MaxSıcaklık < 15°C -> Kullanılabilir
+        # 1. KRİTİK: Sıcaklık > 20°C -> İMHA
+        # 2. DONMA: Toplam Süre (<0°C) >= 30dk -> İMHA (Dondurulabilir hariç)
+        # 3. YÜKSEK RİSK: Süre >= 8 SAAT ve Sıcaklık >= 15°C -> İMHA
+        # 4. GÜVENLİ: Süre < 8 SAAT ve Sıcaklık < 15°C -> KULLANILABİLİR
+        # 5. DİĞER: MANUEL KONTROL
         
         decision_msg = "MANUEL KONTROL GEREKLI (Ara Deger)"
         
-        # Max limit ihlali yoksa veya veri yoksa güvenli kabul edilir (Varsayılan: <8 Saat, <15°C)
         check_dur_hours = total_max_duration.total_seconds() / 3600
         check_max_val = global_max_val if global_max_val is not None else 0 
         
-        if check_dur_hours >= 8 and check_max_val >= 15:
-            decision_msg = "IMHA ONERILIR"
+        if check_max_val > 20:
+             decision_msg = "IMHA ONERILIR (KRITIK SICAKLIK > 20C)"
+        elif total_below_zero_duration >= timedelta(minutes=30):
+             decision_msg = "IMHA ONERILIR (dondurulabilir aşılar hariç)"
+        elif check_dur_hours >= 8 and check_max_val >= 15:
+            decision_msg = "IMHA ONERILIR (SURE > 8s VE ISI > 15C)"
         elif check_dur_hours < 8 and check_max_val < 15:
             decision_msg = "KULLANILABILIR ONERILIR"
         
@@ -337,15 +356,14 @@ if uploaded_file is not None:
         daily_stats = df_clean.groupby('Date')['Temp'].agg(['mean', 'std', 'min', 'max']).reset_index()
         daily_stats.columns = ['Tarih', 'Ortalama', 'StdSapma', 'Min', 'Max']
         
+        slope = 0
         if len(daily_stats) > 1:
             x = np.arange(len(daily_stats))
             y = daily_stats['Ortalama'].values
             z = np.polyfit(x, y, 1)
             slope = z[0]
-        else:
-            slope = 0
 
-        # --- ARAYÜZ SEKMELERİ ---
+        # --- ARAYÜZ GÖRÜNÜMÜ ---
         tab1, tab2, tab3 = st.tabs(["⚠️ Veri Kesintileri", "🚨 Sıcaklık İhlalleri", "📊 İstatistik & Trend"])
 
         with tab1:
@@ -360,7 +378,7 @@ if uploaded_file is not None:
         with tab2:
             st.subheader("Sıcaklık İhlal Raporu")
             
-            # KARAR KARTLARI
+            # Karar Kutusu
             st.markdown("### 🚦 Otomatik Değerlendirme")
             if "IMHA" in decision_msg:
                 st.error(f"🚨 **KARAR:** {decision_msg}")
@@ -371,41 +389,45 @@ if uploaded_file is not None:
                 
             st.divider()
             
+            # Özet Metrikler
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Toplam Üst Limit Aşım", summary_stats["max_dur"])
             col2.metric("En Yüksek Sıcaklık", summary_stats["max_val"])
             col3.metric("Toplam Alt Limit Aşım", summary_stats["min_dur"])
             col4.metric("En Düşük Sıcaklık", summary_stats["min_val"])
             
+            if total_below_zero_duration > timedelta(0):
+                 st.caption(f"❄️ 0°C altı toplam süre: {format_duration(total_below_zero_duration)}")
+
             if not df_violations.empty:
                 st.dataframe(df_violations, use_container_width=True)
                 pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu", violation_summary=summary_stats)
                 st.download_button("📄 İhlal Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal_raporu.pdf", "application/pdf")
             else:
                 st.info("İhlal tablosu boş (limitler içinde).")
-                # İhlal olmasa bile karar raporu basılabilmesi için
+                # İhlal yoksa bile karar özeti PDF'i alabilmek için:
                 pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu", violation_summary=summary_stats)
                 st.download_button("📄 Özet Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal_raporu.pdf", "application/pdf")
         
         with tab3:
             st.subheader("Kestirimci Bakım & İstatistik Analizi")
             c1, c2, c3 = st.columns(3)
-            c1.metric("Genel Ortalama Sıcaklık", f"{df_clean['Temp'].mean():.2f} °C")
-            c2.metric("Genel Standart Sapma", f"{df_clean['Temp'].std():.2f} °C")
+            c1.metric("Genel Ortalama", f"{df_clean['Temp'].mean():.2f} °C")
+            c2.metric("Genel Std. Sapma", f"{df_clean['Temp'].std():.2f} °C")
             
             trend_msg = "Veri yetersiz."
             trend_color = "off"
             if len(daily_stats) > 1:
                 if slope > 0.05:
-                    trend_msg = f"⚠️ ARTIŞ: Günlük ortalama {slope:.3f}°C artıyor."
+                    trend_msg = f"⚠️ ARTIŞ: Günlük +{slope:.3f}°C"
                     trend_color = "inverse"
                 elif slope < -0.05:
-                    trend_msg = f"ℹ️ AZALIŞ: Günlük ortalama {abs(slope):.3f}°C düşüyor."
+                    trend_msg = f"ℹ️ AZALIŞ: Günlük -{abs(slope):.3f}°C"
                     trend_color = "normal"
                 else:
                     trend_msg = "✅ STABİL"
                     trend_color = "normal"
-            c3.metric("Sıcaklık Eğilimi (Trend)", f"{slope:.4f}", delta=trend_msg, delta_color=trend_color)
+            c3.metric("Trend", f"{slope:.4f}", delta=trend_msg, delta_color=trend_color)
 
             col_g1, col_g2 = st.columns(2)
             with col_g1:
