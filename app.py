@@ -30,10 +30,9 @@ intervention_dt = None
 if has_intervention:
     int_date = st.sidebar.date_input("Müdahale Tarihi")
     int_time = st.sidebar.time_input("Müdahale Saati")
-    # Datetime birleştirme
     if int_date and int_time:
         intervention_dt = pd.to_datetime(f"{int_date} {int_time}")
-        st.sidebar.info(f"Analiz **{intervention_dt.strftime('%d.%m.%Y %H:%M')}** tarihine kadar olan verilerle yapılacaktır.")
+        st.sidebar.info(f"Analiz **{intervention_dt.strftime('%d.%m.%Y %H:%M')}** tarihine kadar olan verilerle sınırlandırılacaktır.")
 
 # --- Yardımcı Fonksiyonlar ---
 def tr_fix(text):
@@ -84,10 +83,10 @@ class ReportPDF(FPDF):
         end_str = str(self.metadata.get('Bitis', '-'))
         self.cell(0, 6, f"{start_str} -- {end_str}", ln=True)
         
-        # Müdahale Notu
+        # Header'da Müdahale Uyarısı
         if self.metadata.get('Mudahale'):
             self.set_text_color(200, 0, 0)
-            self.cell(0, 6, tr_fix(f"DIKKAT: {self.metadata['Mudahale']} tarihinden sonraki veriler analize dahil edilmemistir (Mudahale/Transfer)."), ln=True)
+            self.cell(0, 6, tr_fix(f"DIKKAT: {self.metadata['Mudahale']} tarihli MUDAHALE mevcuttur. Analiz bu tarihe kadar yapilmistir."), ln=True)
             self.set_text_color(0, 0, 0)
 
         self.ln(5)
@@ -102,6 +101,16 @@ class ReportPDF(FPDF):
     def add_violation_summary(self, summary_data):
         self.set_font('Arial', 'B', 11)
         self.cell(0, 8, tr_fix("IHLAL OZET TABLOSU"), ln=True)
+        
+        # Müdahale Bilgisi (Tablo Üstü)
+        if summary_data.get('intervention'):
+             self.set_font('Arial', 'B', 9)
+             self.set_text_color(200, 0, 0)
+             self.cell(0, 6, tr_fix(f"MUDAHALE TARIHI: {summary_data['intervention']}"), ln=True)
+             self.set_font('Arial', 'I', 8)
+             self.cell(0, 6, tr_fix("(Bu tarihten sonraki ihlaller toplama dahil edilmemistir)"), ln=True)
+             self.set_text_color(0, 0, 0)
+             self.ln(2)
         
         self.set_font('Arial', '', 10)
         col_w = 45
@@ -120,10 +129,9 @@ class ReportPDF(FPDF):
         self.cell(col_w, 7, tr_fix(summary_data['min_val']), 1)
         self.ln(5)
         
-        # --- KARAR BÖLÜMÜ (PDF) ---
+        # --- KARAR BÖLÜMÜ ---
         decision = summary_data.get('decision', '-')
         self.set_font('Arial', 'B', 12)
-        # Karar kutusu
         self.cell(0, 12, tr_fix(f"KARAR: {decision}"), border=1, ln=True, align='C')
         self.ln(5)
 
@@ -229,7 +237,6 @@ if uploaded_file is not None:
         
         if has_intervention and intervention_dt:
             st.warning(f"⚠️ **DİKKAT:** {intervention_dt.strftime('%d.%m.%Y %H:%M')} tarihinden sonra aşı transferi/müdahale yapıldığı için bu tarihten sonraki veriler **karar analizine dahil edilmemiştir**.")
-            # Metadata'ya ekle ki PDF'te görünsün
             metadata['Mudahale'] = intervention_dt.strftime('%d.%m.%Y %H:%M')
 
         # --- 1. KESİNTİ ANALİZİ ---
@@ -301,31 +308,27 @@ if uploaded_file is not None:
         # Temiz Veri (Boş olmayanlar)
         df_clean = df.dropna(subset=['Temp']).copy()
 
-        # Eğer Müdahale Varsa, Analiz Verisini Filtrele (Decision için)
+        # Müdahale Filtresi (SADECE KARAR VERİLERİ İÇİN)
         if has_intervention and intervention_dt:
             df_decision_scope = df_clean[df_clean['Timestamp'] <= intervention_dt].copy()
         else:
             df_decision_scope = df_clean.copy()
 
-        # ----------------------------------------------------
-        # ANALİZ (Filtrelenmiş Veri Üzerinden)
-        # ----------------------------------------------------
-        
-        # 1. 0 Derece Altı Süresi
+        # 1. 0 Derece Altı Süresi (Filtrelenmiş Veri)
         df_decision_scope['IsFreezing'] = df_decision_scope['Temp'] < 0
         df_decision_scope['FreezeGroup'] = (df_decision_scope['IsFreezing'] != df_decision_scope['IsFreezing'].shift()).cumsum()
         total_below_zero_duration = timedelta(0)
         for _, grp in df_decision_scope[df_decision_scope['IsFreezing']].groupby('FreezeGroup'):
             total_below_zero_duration += (grp['Timestamp'].max() - grp['Timestamp'].min())
 
-        # 2. 20 Derece Üzeri Süresi
+        # 2. 20 Derece Üzeri Süresi (Filtrelenmiş Veri)
         df_decision_scope['IsCriticalHeat'] = df_decision_scope['Temp'] > 20
         df_decision_scope['HeatGroup'] = (df_decision_scope['IsCriticalHeat'] != df_decision_scope['IsCriticalHeat'].shift()).cumsum()
         total_above_20_duration = timedelta(0)
         for _, grp in df_decision_scope[df_decision_scope['IsCriticalHeat']].groupby('HeatGroup'):
             total_above_20_duration += (grp['Timestamp'].max() - grp['Timestamp'].min())
 
-        # 3. Limit İhlalleri (Min/Max)
+        # 3. Limit İhlalleri (Filtrelenmiş Veri)
         df_decision_scope['Status'] = 0 
         df_decision_scope.loc[df_decision_scope['Temp'] < min_temp_limit, 'Status'] = -1
         df_decision_scope.loc[df_decision_scope['Temp'] > max_temp_limit, 'Status'] = 1
@@ -381,7 +384,8 @@ if uploaded_file is not None:
             "max_val": f"{global_max_val} C" if global_max_val is not None else "-",
             "min_dur": format_duration(total_min_duration) if total_min_duration > timedelta(0) else "-",
             "min_val": f"{global_min_val} C" if global_min_val is not None else "-",
-            "decision": decision_msg
+            "decision": decision_msg,
+            "intervention": intervention_dt.strftime('%d.%m.%Y %H:%M') if (has_intervention and intervention_dt) else None
         }
 
         # --- 3. İSTATİSTİK ANALİZ ---
@@ -420,11 +424,9 @@ if uploaded_file is not None:
             else:
                 st.warning(f"⚠️ **KARAR:** {decision_msg}")
             
-            if total_above_20_duration > timedelta(0):
-                 st.caption(f"🔥 20°C üzeri toplam süre: {format_duration(total_above_20_duration)}")
-            if total_below_zero_duration > timedelta(0):
-                 st.caption(f"❄️ 0°C altı toplam süre: {format_duration(total_below_zero_duration)}")
-                
+            if has_intervention and intervention_dt:
+                st.caption(f"ℹ️ Hesaplamalar **{intervention_dt.strftime('%d.%m.%Y %H:%M')}** öncesi verilere göre yapılmıştır.")
+
             st.divider()
             
             # Özet Metrikler
@@ -439,7 +441,7 @@ if uploaded_file is not None:
                 pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu", violation_summary=summary_stats)
                 st.download_button("📄 İhlal Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal_raporu.pdf", "application/pdf")
             else:
-                st.info("Bu tarih aralığında ihlal bulunamadı (limitler içinde).")
+                st.info("İhlal tablosu boş (limitler içinde).")
                 pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu", violation_summary=summary_stats)
                 st.download_button("📄 Özet Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal_raporu.pdf", "application/pdf")
         
@@ -466,12 +468,10 @@ if uploaded_file is not None:
             col_g1, col_g2 = st.columns(2)
             with col_g1:
                 st.markdown("#### 📅 Günlük Ortalama")
-                # Grafik için full data kullanılabilir veya müdahale öncesi. 
-                # Genelde trend için full data istenir ama karar müdahale öncesidir.
-                # Burada kafa karışıklığı olmaması için full data gösteriyoruz, ancak grafikte müdahale anını işaretleyelim.
+                # Grafik için, müdahale çizgisini ekleyelim
                 fig_avg = px.bar(daily_stats, x='Tarih', y='Ortalama', color='Ortalama', color_continuous_scale='Bluered')
                 if has_intervention and intervention_dt:
-                    fig_avg.add_vline(x=intervention_dt.timestamp() * 1000, line_dash="dash", line_color="green", annotation_text="Müdahale")
+                     fig_avg.add_vline(x=intervention_dt.timestamp() * 1000, line_dash="dash", line_color="green", annotation_text="Müdahale")
                 st.plotly_chart(fig_avg, use_container_width=True)
             with col_g2:
                 st.markdown("#### 📉 Stabilite (Std. Sapma)")
