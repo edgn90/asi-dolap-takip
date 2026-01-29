@@ -22,6 +22,19 @@ min_temp_limit = st.sidebar.number_input("Min Sıcaklık (°C)", value=2.0)
 max_temp_limit = st.sidebar.number_input("Max Sıcaklık (°C)", value=8.0)
 HEADER_ROW = 8 
 
+st.sidebar.divider()
+st.sidebar.subheader("Müdahale / Transfer Durumu")
+has_intervention = st.sidebar.checkbox("Aşılar Transfer Edildi mi?")
+intervention_dt = None
+
+if has_intervention:
+    int_date = st.sidebar.date_input("Müdahale Tarihi")
+    int_time = st.sidebar.time_input("Müdahale Saati")
+    # Datetime birleştirme
+    if int_date and int_time:
+        intervention_dt = pd.to_datetime(f"{int_date} {int_time}")
+        st.sidebar.info(f"Analiz **{intervention_dt.strftime('%d.%m.%Y %H:%M')}** tarihine kadar olan verilerle yapılacaktır.")
+
 # --- Yardımcı Fonksiyonlar ---
 def tr_fix(text):
     """FPDF için Türkçe karakter düzeltmesi"""
@@ -71,6 +84,12 @@ class ReportPDF(FPDF):
         end_str = str(self.metadata.get('Bitis', '-'))
         self.cell(0, 6, f"{start_str} -- {end_str}", ln=True)
         
+        # Müdahale Notu
+        if self.metadata.get('Mudahale'):
+            self.set_text_color(200, 0, 0)
+            self.cell(0, 6, tr_fix(f"DIKKAT: {self.metadata['Mudahale']} tarihinden sonraki veriler analize dahil edilmemistir (Mudahale/Transfer)."), ln=True)
+            self.set_text_color(0, 0, 0)
+
         self.ln(5)
         self.line(10, self.get_y(), 200, self.get_y())
         self.ln(5)
@@ -207,6 +226,11 @@ if uploaded_file is not None:
         **Birim:** {metadata.get('Birim','-')} | **Depo:** {metadata.get('Depo','-')}
         📅 **Rapor Tarih Aralığı (Header):** {disp_start} — {disp_end}
         """)
+        
+        if has_intervention and intervention_dt:
+            st.warning(f"⚠️ **DİKKAT:** {intervention_dt.strftime('%d.%m.%Y %H:%M')} tarihinden sonra aşı transferi/müdahale yapıldığı için bu tarihten sonraki veriler **karar analizine dahil edilmemiştir**.")
+            # Metadata'ya ekle ki PDF'te görünsün
+            metadata['Mudahale'] = intervention_dt.strftime('%d.%m.%Y %H:%M')
 
         # --- 1. KESİNTİ ANALİZİ ---
         gap_threshold = timedelta(hours=gap_threshold_hours)
@@ -224,7 +248,7 @@ if uploaded_file is not None:
                 "Sure": row['TimeDiff']
             })
 
-        # B) Başlangıç/Bitiş Kaybı (Header Tarihlerine Göre)
+        # B) Başlangıç/Bitiş Kaybı
         if meta_start_dt:
             first_data_time = df['Timestamp'].min()
             start_diff = first_data_time - meta_start_dt
@@ -247,7 +271,7 @@ if uploaded_file is not None:
                     "Sure": end_diff
                 })
         
-        # C) Sıcaklık Verisi Yok (Boş Hücre)
+        # C) Sıcaklık Verisi Yok
         df['IsMissingTemp'] = df['Temp'].isna()
         df['MissingGroup'] = (df['IsMissingTemp'] != df['IsMissingTemp'].shift()).cumsum()
         for _, group in df[df['IsMissingTemp']].groupby('MissingGroup'):
@@ -273,29 +297,39 @@ if uploaded_file is not None:
 
 
         # --- 2. SICAKLIK İHLALİ ve KARAR ---
+        
+        # Temiz Veri (Boş olmayanlar)
         df_clean = df.dropna(subset=['Temp']).copy()
+
+        # Eğer Müdahale Varsa, Analiz Verisini Filtrele (Decision için)
+        if has_intervention and intervention_dt:
+            df_decision_scope = df_clean[df_clean['Timestamp'] <= intervention_dt].copy()
+        else:
+            df_decision_scope = df_clean.copy()
+
+        # ----------------------------------------------------
+        # ANALİZ (Filtrelenmiş Veri Üzerinden)
+        # ----------------------------------------------------
         
-        # 1. Analiz: 0 Derece Altı Süresi
-        df_clean['IsFreezing'] = df_clean['Temp'] < 0
-        df_clean['FreezeGroup'] = (df_clean['IsFreezing'] != df_clean['IsFreezing'].shift()).cumsum()
+        # 1. 0 Derece Altı Süresi
+        df_decision_scope['IsFreezing'] = df_decision_scope['Temp'] < 0
+        df_decision_scope['FreezeGroup'] = (df_decision_scope['IsFreezing'] != df_decision_scope['IsFreezing'].shift()).cumsum()
         total_below_zero_duration = timedelta(0)
-        
-        for _, grp in df_clean[df_clean['IsFreezing']].groupby('FreezeGroup'):
+        for _, grp in df_decision_scope[df_decision_scope['IsFreezing']].groupby('FreezeGroup'):
             total_below_zero_duration += (grp['Timestamp'].max() - grp['Timestamp'].min())
 
-        # 2. Analiz: 20 Derece Üzeri Süresi
-        df_clean['IsCriticalHeat'] = df_clean['Temp'] > 20
-        df_clean['HeatGroup'] = (df_clean['IsCriticalHeat'] != df_clean['IsCriticalHeat'].shift()).cumsum()
+        # 2. 20 Derece Üzeri Süresi
+        df_decision_scope['IsCriticalHeat'] = df_decision_scope['Temp'] > 20
+        df_decision_scope['HeatGroup'] = (df_decision_scope['IsCriticalHeat'] != df_decision_scope['IsCriticalHeat'].shift()).cumsum()
         total_above_20_duration = timedelta(0)
-        
-        for _, grp in df_clean[df_clean['IsCriticalHeat']].groupby('HeatGroup'):
+        for _, grp in df_decision_scope[df_decision_scope['IsCriticalHeat']].groupby('HeatGroup'):
             total_above_20_duration += (grp['Timestamp'].max() - grp['Timestamp'].min())
 
-        # 3. Analiz: Normal Limit İhlalleri (Tüm tablo için)
-        df_clean['Status'] = 0 
-        df_clean.loc[df_clean['Temp'] < min_temp_limit, 'Status'] = -1
-        df_clean.loc[df_clean['Temp'] > max_temp_limit, 'Status'] = 1
-        df_clean['Group'] = (df_clean['Status'] != df_clean['Status'].shift()).cumsum()
+        # 3. Limit İhlalleri (Min/Max)
+        df_decision_scope['Status'] = 0 
+        df_decision_scope.loc[df_decision_scope['Temp'] < min_temp_limit, 'Status'] = -1
+        df_decision_scope.loc[df_decision_scope['Temp'] > max_temp_limit, 'Status'] = 1
+        df_decision_scope['Group'] = (df_decision_scope['Status'] != df_decision_scope['Status'].shift()).cumsum()
         
         violation_events = []
         total_max_duration = timedelta(0)
@@ -303,7 +337,7 @@ if uploaded_file is not None:
         global_max_val = None
         global_min_val = None
         
-        for _, group in df_clean[df_clean['Status'] != 0].groupby('Group'):
+        for _, group in df_decision_scope[df_decision_scope['Status'] != 0].groupby('Group'):
             status = group['Status'].iloc[0]
             v_type = "Min Alti" if status == -1 else "Max Ustu"
             s_t = group['Timestamp'].min()
@@ -326,22 +360,18 @@ if uploaded_file is not None:
                 "En Uc Deger": extreme
             })
         
-        # --- KARAR MANTIĞI (ÖNCELİK SIRALI) ---
+        # --- KARAR MANTIĞI ---
         decision_msg = "MANUEL KONTROL GEREKLI (Ara Deger)"
         
         check_dur_hours = total_max_duration.total_seconds() / 3600
         check_max_val = global_max_val if global_max_val is not None else 0 
         
-        # Kural 1: > 20 C ve Süre >= 2 Saat -> İMHA
         if total_above_20_duration >= timedelta(hours=2):
              decision_msg = "IMHA ONERILIR (KRITIK SICAKLIK > 20C VE SURE > 2 Saat)"
-        # Kural 2: < 0 C ve Süre >= 30 Dk -> İMHA
         elif total_below_zero_duration >= timedelta(minutes=30):
              decision_msg = "IMHA ONERILIR (dondurulabilir aşılar hariç)"
-        # Kural 3: Limit İhlali >= 8 Saat ve Max >= 15 C -> İMHA
         elif check_dur_hours >= 8 and check_max_val >= 15:
             decision_msg = "IMHA ONERILIR (SURE > 8s VE ISI > 15C)"
-        # Kural 4: Limit İhlali < 8 Saat ve Max < 15 C -> KULLANILABİLİR
         elif check_dur_hours < 8 and check_max_val < 15:
             decision_msg = "KULLANILABILIR ONERILIR"
         
@@ -390,7 +420,6 @@ if uploaded_file is not None:
             else:
                 st.warning(f"⚠️ **KARAR:** {decision_msg}")
             
-            # Detay Bilgisi
             if total_above_20_duration > timedelta(0):
                  st.caption(f"🔥 20°C üzeri toplam süre: {format_duration(total_above_20_duration)}")
             if total_below_zero_duration > timedelta(0):
@@ -410,7 +439,7 @@ if uploaded_file is not None:
                 pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu", violation_summary=summary_stats)
                 st.download_button("📄 İhlal Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal_raporu.pdf", "application/pdf")
             else:
-                st.info("İhlal tablosu boş (limitler içinde).")
+                st.info("Bu tarih aralığında ihlal bulunamadı (limitler içinde).")
                 pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu", violation_summary=summary_stats)
                 st.download_button("📄 Özet Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal_raporu.pdf", "application/pdf")
         
@@ -437,7 +466,12 @@ if uploaded_file is not None:
             col_g1, col_g2 = st.columns(2)
             with col_g1:
                 st.markdown("#### 📅 Günlük Ortalama")
+                # Grafik için full data kullanılabilir veya müdahale öncesi. 
+                # Genelde trend için full data istenir ama karar müdahale öncesidir.
+                # Burada kafa karışıklığı olmaması için full data gösteriyoruz, ancak grafikte müdahale anını işaretleyelim.
                 fig_avg = px.bar(daily_stats, x='Tarih', y='Ortalama', color='Ortalama', color_continuous_scale='Bluered')
+                if has_intervention and intervention_dt:
+                    fig_avg.add_vline(x=intervention_dt.timestamp() * 1000, line_dash="dash", line_color="green", annotation_text="Müdahale")
                 st.plotly_chart(fig_avg, use_container_width=True)
             with col_g2:
                 st.markdown("#### 📉 Stabilite (Std. Sapma)")
