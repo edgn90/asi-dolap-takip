@@ -174,7 +174,6 @@ def analyze_data(file):
         df['Timestamp'] = pd.to_datetime(df[time_col], dayfirst=True, errors='coerce')
         df = df.dropna(subset=['Timestamp']).sort_values('Timestamp')
 
-        # Sıcaklık string ise floata çevir (NaN kalabilir)
         if df[temp_col].dtype == object:
             df['Temp'] = df[temp_col].str.replace(',', '.').astype(float)
         else:
@@ -276,17 +275,23 @@ if uploaded_file is not None:
         # --- 2. SICAKLIK İHLALİ ve KARAR ---
         df_clean = df.dropna(subset=['Temp']).copy()
         
-        # 0 Derece Altı Özel Analiz (Karar İçin)
+        # 1. Analiz: 0 Derece Altı Süresi
         df_clean['IsFreezing'] = df_clean['Temp'] < 0
         df_clean['FreezeGroup'] = (df_clean['IsFreezing'] != df_clean['IsFreezing'].shift()).cumsum()
         total_below_zero_duration = timedelta(0)
         
         for _, grp in df_clean[df_clean['IsFreezing']].groupby('FreezeGroup'):
-            s = grp['Timestamp'].min()
-            e = grp['Timestamp'].max()
-            total_below_zero_duration += (e - s)
+            total_below_zero_duration += (grp['Timestamp'].max() - grp['Timestamp'].min())
 
-        # Normal İhlal Analizi
+        # 2. Analiz: 20 Derece Üzeri Süresi
+        df_clean['IsCriticalHeat'] = df_clean['Temp'] > 20
+        df_clean['HeatGroup'] = (df_clean['IsCriticalHeat'] != df_clean['IsCriticalHeat'].shift()).cumsum()
+        total_above_20_duration = timedelta(0)
+        
+        for _, grp in df_clean[df_clean['IsCriticalHeat']].groupby('HeatGroup'):
+            total_above_20_duration += (grp['Timestamp'].max() - grp['Timestamp'].min())
+
+        # 3. Analiz: Normal Limit İhlalleri (Tüm tablo için)
         df_clean['Status'] = 0 
         df_clean.loc[df_clean['Temp'] < min_temp_limit, 'Status'] = -1
         df_clean.loc[df_clean['Temp'] > max_temp_limit, 'Status'] = 1
@@ -321,24 +326,22 @@ if uploaded_file is not None:
                 "En Uc Deger": extreme
             })
         
-        # --- KARAR MANTIĞI ---
-        # 1. KRİTİK: Sıcaklık > 20°C -> İMHA
-        # 2. DONMA: Toplam Süre (<0°C) >= 30dk -> İMHA (Dondurulabilir hariç)
-        # 3. YÜKSEK RİSK: Süre >= 8 SAAT ve Sıcaklık >= 15°C -> İMHA
-        # 4. GÜVENLİ: Süre < 8 SAAT ve Sıcaklık < 15°C -> KULLANILABİLİR
-        # 5. DİĞER: MANUEL KONTROL
-        
+        # --- KARAR MANTIĞI (ÖNCELİK SIRALI) ---
         decision_msg = "MANUEL KONTROL GEREKLI (Ara Deger)"
         
         check_dur_hours = total_max_duration.total_seconds() / 3600
         check_max_val = global_max_val if global_max_val is not None else 0 
         
-        if check_max_val > 20:
-             decision_msg = "IMHA ONERILIR (KRITIK SICAKLIK > 20C)"
+        # Kural 1: > 20 C ve Süre >= 2 Saat -> İMHA
+        if total_above_20_duration >= timedelta(hours=2):
+             decision_msg = "IMHA ONERILIR (KRITIK SICAKLIK > 20C VE SURE > 2 Saat)"
+        # Kural 2: < 0 C ve Süre >= 30 Dk -> İMHA
         elif total_below_zero_duration >= timedelta(minutes=30):
              decision_msg = "IMHA ONERILIR (dondurulabilir aşılar hariç)"
+        # Kural 3: Limit İhlali >= 8 Saat ve Max >= 15 C -> İMHA
         elif check_dur_hours >= 8 and check_max_val >= 15:
             decision_msg = "IMHA ONERILIR (SURE > 8s VE ISI > 15C)"
+        # Kural 4: Limit İhlali < 8 Saat ve Max < 15 C -> KULLANILABİLİR
         elif check_dur_hours < 8 and check_max_val < 15:
             decision_msg = "KULLANILABILIR ONERILIR"
         
@@ -386,6 +389,12 @@ if uploaded_file is not None:
                 st.success(f"✅ **KARAR:** {decision_msg}")
             else:
                 st.warning(f"⚠️ **KARAR:** {decision_msg}")
+            
+            # Detay Bilgisi
+            if total_above_20_duration > timedelta(0):
+                 st.caption(f"🔥 20°C üzeri toplam süre: {format_duration(total_above_20_duration)}")
+            if total_below_zero_duration > timedelta(0):
+                 st.caption(f"❄️ 0°C altı toplam süre: {format_duration(total_below_zero_duration)}")
                 
             st.divider()
             
@@ -396,16 +405,12 @@ if uploaded_file is not None:
             col3.metric("Toplam Alt Limit Aşım", summary_stats["min_dur"])
             col4.metric("En Düşük Sıcaklık", summary_stats["min_val"])
             
-            if total_below_zero_duration > timedelta(0):
-                 st.caption(f"❄️ 0°C altı toplam süre: {format_duration(total_below_zero_duration)}")
-
             if not df_violations.empty:
                 st.dataframe(df_violations, use_container_width=True)
                 pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu", violation_summary=summary_stats)
                 st.download_button("📄 İhlal Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal_raporu.pdf", "application/pdf")
             else:
                 st.info("İhlal tablosu boş (limitler içinde).")
-                # İhlal yoksa bile karar özeti PDF'i alabilmek için:
                 pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu", violation_summary=summary_stats)
                 st.download_button("📄 Özet Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal_raporu.pdf", "application/pdf")
         
