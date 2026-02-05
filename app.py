@@ -48,9 +48,15 @@ def tr_fix(text):
     return text
 
 def parse_metadata_date(date_str):
+    """Tarih parsing işlemi - NaT hatasını önlemek için güncellendi"""
     try:
-        date_str = date_str.strip().replace('"', '').replace("'", "")
-        return pd.to_datetime(date_str, dayfirst=True)
+        if not date_str or pd.isna(date_str):
+            return None
+        date_str = str(date_str).strip().replace('"', '').replace("'", "")
+        dt = pd.to_datetime(date_str, dayfirst=True)
+        if pd.isna(dt): # Eğer NaT (Not a Time) dönerse None yap
+            return None
+        return dt
     except:
         return None
 
@@ -83,7 +89,6 @@ class ReportPDF(FPDF):
         end_str = str(self.metadata.get('Bitis', '-'))
         self.cell(0, 6, f"{start_str} -- {end_str}", ln=True)
         
-        # Header'da Müdahale Uyarısı
         if self.metadata.get('Mudahale'):
             self.set_text_color(200, 0, 0)
             self.cell(0, 6, tr_fix(f"DIKKAT: {self.metadata['Mudahale']} tarihli MUDAHALE mevcuttur. Analiz bu tarihe kadar yapilmistir."), ln=True)
@@ -102,7 +107,6 @@ class ReportPDF(FPDF):
         self.set_font('Arial', 'B', 11)
         self.cell(0, 8, tr_fix("IHLAL OZET TABLOSU"), ln=True)
         
-        # Müdahale Bilgisi (Tablo Üstü)
         if summary_data.get('intervention'):
              self.set_font('Arial', 'B', 9)
              self.set_text_color(200, 0, 0)
@@ -129,7 +133,6 @@ class ReportPDF(FPDF):
         self.cell(col_w, 7, tr_fix(summary_data['min_val']), 1)
         self.ln(5)
         
-        # --- KARAR BÖLÜMÜ ---
         decision = summary_data.get('decision', '-')
         self.set_font('Arial', 'B', 12)
         self.cell(0, 12, tr_fix(f"KARAR: {decision}"), border=1, ln=True, align='C')
@@ -227,8 +230,9 @@ if uploaded_file is not None:
         meta_start_dt = parse_metadata_date(metadata.get('Baslangic', ''))
         meta_end_dt = parse_metadata_date(metadata.get('Bitis', ''))
         
-        disp_start = meta_start_dt.strftime('%d.%m.%Y %H:%M') if meta_start_dt else "Belirtilmemiş"
-        disp_end = meta_end_dt.strftime('%d.%m.%Y %H:%M') if meta_end_dt else "Belirtilmemiş"
+        # HATA DÜZELTME: NaT kontrolü eklendi
+        disp_start = meta_start_dt.strftime('%d.%m.%Y %H:%M') if pd.notna(meta_start_dt) else "Belirtilmemiş"
+        disp_end = meta_end_dt.strftime('%d.%m.%Y %H:%M') if pd.notna(meta_end_dt) else "Belirtilmemiş"
 
         st.info(f"""
         **Birim:** {metadata.get('Birim','-')} | **Depo:** {metadata.get('Depo','-')}
@@ -256,7 +260,7 @@ if uploaded_file is not None:
             })
 
         # B) Başlangıç/Bitiş Kaybı
-        if meta_start_dt:
+        if pd.notna(meta_start_dt):
             first_data_time = df['Timestamp'].min()
             start_diff = first_data_time - meta_start_dt
             if start_diff >= gap_threshold:
@@ -267,7 +271,7 @@ if uploaded_file is not None:
                     "Sure": start_diff
                 })
 
-        if meta_end_dt:
+        if pd.notna(meta_end_dt):
             last_data_time = df['Timestamp'].max()
             end_diff = meta_end_dt - last_data_time
             if end_diff >= gap_threshold:
@@ -304,8 +308,6 @@ if uploaded_file is not None:
 
 
         # --- 2. SICAKLIK İHLALİ ve KARAR ---
-        
-        # Temiz Veri (Boş olmayanlar)
         df_clean = df.dropna(subset=['Temp']).copy()
 
         # Müdahale Filtresi (SADECE KARAR VERİLERİ İÇİN)
@@ -314,21 +316,21 @@ if uploaded_file is not None:
         else:
             df_decision_scope = df_clean.copy()
 
-        # 1. 0 Derece Altı Süresi (Filtrelenmiş Veri)
+        # 1. 0 Derece Altı Süresi
         df_decision_scope['IsFreezing'] = df_decision_scope['Temp'] < 0
         df_decision_scope['FreezeGroup'] = (df_decision_scope['IsFreezing'] != df_decision_scope['IsFreezing'].shift()).cumsum()
         total_below_zero_duration = timedelta(0)
         for _, grp in df_decision_scope[df_decision_scope['IsFreezing']].groupby('FreezeGroup'):
             total_below_zero_duration += (grp['Timestamp'].max() - grp['Timestamp'].min())
 
-        # 2. 20 Derece Üzeri Süresi (Filtrelenmiş Veri)
+        # 2. 20 Derece Üzeri Süresi
         df_decision_scope['IsCriticalHeat'] = df_decision_scope['Temp'] > 20
         df_decision_scope['HeatGroup'] = (df_decision_scope['IsCriticalHeat'] != df_decision_scope['IsCriticalHeat'].shift()).cumsum()
         total_above_20_duration = timedelta(0)
         for _, grp in df_decision_scope[df_decision_scope['IsCriticalHeat']].groupby('HeatGroup'):
             total_above_20_duration += (grp['Timestamp'].max() - grp['Timestamp'].min())
 
-        # 3. Limit İhlalleri (Filtrelenmiş Veri)
+        # 3. Limit İhlalleri
         df_decision_scope['Status'] = 0 
         df_decision_scope.loc[df_decision_scope['Temp'] < min_temp_limit, 'Status'] = -1
         df_decision_scope.loc[df_decision_scope['Temp'] > max_temp_limit, 'Status'] = 1
@@ -365,7 +367,6 @@ if uploaded_file is not None:
         
         # --- KARAR MANTIĞI ---
         decision_msg = "MANUEL KONTROL GEREKLI (Ara Deger)"
-        
         check_dur_hours = total_max_duration.total_seconds() / 3600
         check_max_val = global_max_val if global_max_val is not None else 0 
         
@@ -468,7 +469,6 @@ if uploaded_file is not None:
             col_g1, col_g2 = st.columns(2)
             with col_g1:
                 st.markdown("#### 📅 Günlük Ortalama")
-                # Grafik için, müdahale çizgisini ekleyelim
                 fig_avg = px.bar(daily_stats, x='Tarih', y='Ortalama', color='Ortalama', color_continuous_scale='Bluered')
                 if has_intervention and intervention_dt:
                      fig_avg.add_vline(x=intervention_dt.timestamp() * 1000, line_dash="dash", line_color="green", annotation_text="Müdahale")
