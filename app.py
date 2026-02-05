@@ -48,13 +48,13 @@ def tr_fix(text):
     return text
 
 def parse_metadata_date(date_str):
-    """Tarih parsing işlemi - NaT hatasını önlemek için güncellendi"""
     try:
         if not date_str or pd.isna(date_str):
             return None
         date_str = str(date_str).strip().replace('"', '').replace("'", "")
+        # NaT kontrolü
         dt = pd.to_datetime(date_str, dayfirst=True)
-        if pd.isna(dt): # Eğer NaT (Not a Time) dönerse None yap
+        if pd.isna(dt):
             return None
         return dt
     except:
@@ -165,7 +165,12 @@ def extract_metadata(file):
     try:
         lines = [file.readline().decode('ISO-8859-9').strip() for _ in range(HEADER_ROW + 2)]
         for line in lines:
-            parts = line.split(',')
+            # Hem ; hem , ayracını destekle
+            if ';' in line:
+                parts = line.split(';')
+            else:
+                parts = line.split(',')
+                
             clean_parts = [p.strip().replace('"', '') for p in parts if p.strip()]
             if len(clean_parts) >= 2:
                 key = clean_parts[0]
@@ -184,10 +189,14 @@ def analyze_data(file):
     file.seek(0)
     try:
         try:
-            df = pd.read_csv(file, header=HEADER_ROW, encoding='utf-8')
+            # sep=None ve engine='python' ile otomatik ayraç tespiti
+            df = pd.read_csv(file, header=HEADER_ROW, sep=None, engine='python', encoding='utf-8')
         except UnicodeDecodeError:
             file.seek(0) 
-            df = pd.read_csv(file, header=HEADER_ROW, encoding='ISO-8859-9')
+            df = pd.read_csv(file, header=HEADER_ROW, sep=None, engine='python', encoding='ISO-8859-9')
+        
+        # Boş sütunları temizle (Unnamed vb)
+        df = df.dropna(axis=1, how='all')
         
         df.columns = df.columns.str.strip()
         upper_cols = [c.upper() for c in df.columns]
@@ -230,7 +239,6 @@ if uploaded_file is not None:
         meta_start_dt = parse_metadata_date(metadata.get('Baslangic', ''))
         meta_end_dt = parse_metadata_date(metadata.get('Bitis', ''))
         
-        # HATA DÜZELTME: NaT kontrolü eklendi
         disp_start = meta_start_dt.strftime('%d.%m.%Y %H:%M') if pd.notna(meta_start_dt) else "Belirtilmemiş"
         disp_end = meta_end_dt.strftime('%d.%m.%Y %H:%M') if pd.notna(meta_end_dt) else "Belirtilmemiş"
 
@@ -310,7 +318,7 @@ if uploaded_file is not None:
         # --- 2. SICAKLIK İHLALİ ve KARAR ---
         df_clean = df.dropna(subset=['Temp']).copy()
 
-        # Müdahale Filtresi (SADECE KARAR VERİLERİ İÇİN)
+        # Müdahale Filtresi (KARAR VERİLERİ İÇİN)
         if has_intervention and intervention_dt:
             df_decision_scope = df_clean[df_clean['Timestamp'] <= intervention_dt].copy()
         else:
