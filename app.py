@@ -64,24 +64,15 @@ def format_duration(td):
     return str(td).split('.')[0]
 
 def calculate_mkt(temps_celsius):
-    """
-    Arrhenius denklemine dayalı Ortalama Kinetik Sıcaklık (MKT) Hesabı.
-    dH (Aktivasyon Enerjisi) = 83.144 kJ/mol, R = 8.3144 J/(mol*K)
-    dH / R yaklasik 10000 K kabul edilir.
-    """
+    """Arrhenius denklemine dayalı Ortalama Kinetik Sıcaklık (MKT) Hesabı"""
     if temps_celsius.empty:
         return None
-    # Sıcaklıkları Kelvin'e çevir
     temps_kelvin = temps_celsius + 273.15
-    dh_r = 10000  # Farmasötikler için genel kabul gören sabit oran
-    
-    # Arrhenius üstel hesaplaması
+    dh_r = 10000 
     exp_terms = np.exp(-dh_r / temps_kelvin)
     avg_exp = exp_terms.mean()
-    
     if avg_exp == 0:
         return None
-        
     mkt_kelvin = dh_r / (-np.log(avg_exp))
     mkt_celsius = mkt_kelvin - 273.15
     return mkt_celsius
@@ -190,7 +181,12 @@ def extract_metadata(file):
     file.seek(0)
     meta = {}
     try:
-        lines = [file.readline().decode('ISO-8859-9').strip() for _ in range(HEADER_ROW + 2)]
+        try:
+            lines = [file.readline().decode('utf-8').strip() for _ in range(HEADER_ROW + 2)]
+        except UnicodeDecodeError:
+            file.seek(0)
+            lines = [file.readline().decode('ISO-8859-9').strip() for _ in range(HEADER_ROW + 2)]
+            
         for line in lines:
             if ';' in line:
                 parts = line.split(';')
@@ -199,13 +195,14 @@ def extract_metadata(file):
                 
             clean_parts = [p.strip().replace('"', '') for p in parts if p.strip()]
             if len(clean_parts) >= 2:
-                key = clean_parts[0]
+                # Key'i tamamen büyük harfe çevirip eşleştirme kalitesini artırdık
+                key = clean_parts[0].upper()
                 val = clean_parts[1]
-                if "Birim" in key and "Stok" not in key: meta['Birim'] = val
-                elif "Depo" in key: meta['Depo'] = val
-                elif "Stok" in key: meta['Stok'] = val
-                elif "Baslangiç" in key or "Baslangic" in key or "Başlangıç" in key: meta['Baslangic'] = val
-                elif "Bitis" in key or "Bitiş" in key: meta['Bitis'] = val
+                if "BİRİM" in key or "BIRIM" in key and "STOK" not in key: meta['Birim'] = val
+                elif "DEPO" in key: meta['Depo'] = val
+                elif "STOK" in key: meta['Stok'] = val
+                elif "BASLANG" in key or "BAŞLANG" in key: meta['Baslangic'] = val
+                elif "BITIS" in key or "BİTİŞ" in key: meta['Bitis'] = val
     except Exception as e:
         pass
     return meta
@@ -325,6 +322,21 @@ if uploaded_file is not None:
                     "Sure": dur
                 })
         
+        # En büyük kesintiyi bulma (Karar kapsamındaki kör noktayı saptamak için)
+        valid_gaps = []
+        for gap in all_gaps:
+            gap_start = gap["Baslangic"]
+            # Eğer müdahale (transfer) varsa ve bu boşluk müdahaleden SONRA başlıyorsa yoksay
+            if has_intervention and intervention_dt and gap_start >= intervention_dt:
+                continue
+            valid_gaps.append(gap["Sure"])
+            
+        if valid_gaps:
+            max_gap_td = max(valid_gaps)
+        else:
+            max_gap_td = timedelta(0)
+
+        # Tablo Gösterimi İçin Formatlama
         if all_gaps:
             df_gaps_report = pd.DataFrame(all_gaps).sort_values('Baslangic')
             df_gaps_report['Baslangic'] = df_gaps_report['Baslangic'].apply(lambda x: x.strftime('%d.%m.%Y %H:%M:%S'))
@@ -343,13 +355,6 @@ if uploaded_file is not None:
             df_decision_scope = df_clean[df_clean['Timestamp'] <= intervention_dt].copy()
         else:
             df_decision_scope = df_clean.copy()
-
-        # En büyük kesintiyi bul (Karar kapsamındaki kör nokta)
-        max_gap_td = timedelta(0)
-        if len(df_decision_scope) > 1:
-            max_gap_td = df_decision_scope['Timestamp'].diff().max()
-            if pd.isna(max_gap_td): 
-                max_gap_td = timedelta(0)
 
         # Ortalama Kinetik Sıcaklık (MKT) Hesaplaması
         mkt_value = calculate_mkt(df_decision_scope['Temp'])
@@ -417,11 +422,11 @@ if uploaded_file is not None:
         elif check_dur_hours >= 8 and check_max_val >= 15:
             decision_msg = "IMHA ONERILIR (SURE > 8s VE ISI > 15C)"
             
-        elif max_gap_td >= timedelta(hours=gap_threshold_hours):
-            decision_msg = f"KARANTINA / RISK: Cihazda {format_duration(max_gap_td)} sureli veri kesintisi (kor nokta) tespit edildi. Sicaklik bilinemiyor!"
+        elif max_gap_td >= gap_threshold:
+            decision_msg = f"KARANTINA / RISK: Cihazda {format_duration(max_gap_td)} sureli veri kesintisi (kor nokta) tespit edildi!"
             
         elif check_dur_hours < 8 and (mkt_value is not None and mkt_value > max_temp_limit):
-            decision_msg = f"KARANTINA / RISK: Ihlal suresi 8 saati asmadi ama termal stres (MKT: {mkt_value:.2f}C) cok yuksek, urunun yapisi bozulmus olabilir!"
+            decision_msg = f"KARANTINA / RISK: Ihlal suresi 8 saati asmadi ama termal stres (MKT: {mkt_value:.2f}C) cok yuksek!"
             
         elif check_dur_hours < 8 and check_max_val < 15:
             decision_msg = "KULLANILABILIR ONERILIR"
