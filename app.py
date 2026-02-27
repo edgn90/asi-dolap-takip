@@ -155,7 +155,6 @@ class ReportPDF(FPDF):
         self.cell(col_w, 7, tr_fix(summary_data['min_val']), 1)
         self.ln(5)
         
-        # MKT Bilgisi PDF'e eklendi
         if summary_data.get('mkt_val'):
             self.set_font('Arial', 'I', 9)
             self.cell(0, 6, tr_fix(f"Ortalama Kinetik Sicaklik (MKT): {summary_data['mkt_val']}"), ln=True)
@@ -345,6 +344,13 @@ if uploaded_file is not None:
         else:
             df_decision_scope = df_clean.copy()
 
+        # En büyük kesintiyi bul (Karar kapsamındaki kör nokta)
+        max_gap_td = timedelta(0)
+        if len(df_decision_scope) > 1:
+            max_gap_td = df_decision_scope['Timestamp'].diff().max()
+            if pd.isna(max_gap_td): 
+                max_gap_td = timedelta(0)
+
         # Ortalama Kinetik Sıcaklık (MKT) Hesaplaması
         mkt_value = calculate_mkt(df_decision_scope['Temp'])
 
@@ -397,22 +403,26 @@ if uploaded_file is not None:
                 "En Uc Deger": extreme
             })
         
-        # --- MKT BAZLI AKILLI KARAR MANTIĞI ---
+        # --- AKILLI KARAR MANTIĞI (Öncelik Sırasıyla) ---
         decision_msg = "MANUEL KONTROL GEREKLI (Ara Deger)"
         check_dur_hours = total_max_duration.total_seconds() / 3600
         check_max_val = global_max_val if global_max_val is not None else 0 
         
         if total_above_20_duration >= timedelta(hours=2):
              decision_msg = "IMHA ONERILIR (KRITIK SICAKLIK > 20C VE SURE > 2 Saat)"
+             
         elif total_below_zero_duration >= timedelta(minutes=30):
              decision_msg = "IMHA ONERILIR (dondurulabilir asilar haric)"
+             
         elif check_dur_hours >= 8 and check_max_val >= 15:
             decision_msg = "IMHA ONERILIR (SURE > 8s VE ISI > 15C)"
-        
-        # YENİ KURAL: Süre 8 saati geçmese bile, Ortalama Kinetik Sıcaklık üst limitin üzerindeyse Karantina.
+            
+        elif max_gap_td >= timedelta(hours=gap_threshold_hours):
+            decision_msg = f"KARANTINA / RISK: Cihazda {format_duration(max_gap_td)} sureli veri kesintisi (kor nokta) tespit edildi. Sicaklik bilinemiyor!"
+            
         elif check_dur_hours < 8 and (mkt_value is not None and mkt_value > max_temp_limit):
             decision_msg = f"KARANTINA / RISK: Ihlal suresi 8 saati asmadi ama termal stres (MKT: {mkt_value:.2f}C) cok yuksek, urunun yapisi bozulmus olabilir!"
-        
+            
         elif check_dur_hours < 8 and check_max_val < 15:
             decision_msg = "KULLANILABILIR ONERILIR"
         
