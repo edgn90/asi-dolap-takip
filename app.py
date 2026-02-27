@@ -9,7 +9,7 @@ from fpdf import FPDF
 st.set_page_config(page_title="Aşı Dolabı Analiz Raporu", layout="wide")
 
 st.title("🌡️ Detaylı Aşı/İlaç Dolabı Sıcaklık Analizi")
-st.markdown("Yüklenen sensör verilerini analiz eder; kesintileri, ihlalleri, trendleri ve **otomatik karar önerisini** raporlar.")
+st.markdown("Yüklenen sensör verilerini analiz eder; kesintileri, ihlalleri, trendleri ve **Ortalama Kinetik Sıcaklık (MKT)** bazlı otomatik kararları raporlar.")
 
 # --- Ayarlar Sidebar ---
 st.sidebar.header("⚙️ Analiz Ayarları")
@@ -52,7 +52,6 @@ def parse_metadata_date(date_str):
         if not date_str or pd.isna(date_str):
             return None
         date_str = str(date_str).strip().replace('"', '').replace("'", "")
-        # NaT kontrolü
         dt = pd.to_datetime(date_str, dayfirst=True)
         if pd.isna(dt):
             return None
@@ -63,6 +62,29 @@ def parse_metadata_date(date_str):
 def format_duration(td):
     """Timedelta'yı okunabilir string'e çevirir"""
     return str(td).split('.')[0]
+
+def calculate_mkt(temps_celsius):
+    """
+    Arrhenius denklemine dayalı Ortalama Kinetik Sıcaklık (MKT) Hesabı.
+    dH (Aktivasyon Enerjisi) = 83.144 kJ/mol, R = 8.3144 J/(mol*K)
+    dH / R yaklasik 10000 K kabul edilir.
+    """
+    if temps_celsius.empty:
+        return None
+    # Sıcaklıkları Kelvin'e çevir
+    temps_kelvin = temps_celsius + 273.15
+    dh_r = 10000  # Farmasötikler için genel kabul gören sabit oran
+    
+    # Arrhenius üstel hesaplaması
+    exp_terms = np.exp(-dh_r / temps_kelvin)
+    avg_exp = exp_terms.mean()
+    
+    if avg_exp == 0:
+        return None
+        
+    mkt_kelvin = dh_r / (-np.log(avg_exp))
+    mkt_celsius = mkt_kelvin - 273.15
+    return mkt_celsius
 
 # --- PDF Sınıfı ---
 class ReportPDF(FPDF):
@@ -105,7 +127,7 @@ class ReportPDF(FPDF):
 
     def add_violation_summary(self, summary_data):
         self.set_font('Arial', 'B', 11)
-        self.cell(0, 8, tr_fix("IHLAL OZET TABLOSU"), ln=True)
+        self.cell(0, 8, tr_fix("IHLAL VE TERMAL STRES OZETI"), ln=True)
         
         if summary_data.get('intervention'):
              self.set_font('Arial', 'B', 9)
@@ -133,9 +155,15 @@ class ReportPDF(FPDF):
         self.cell(col_w, 7, tr_fix(summary_data['min_val']), 1)
         self.ln(5)
         
+        # MKT Bilgisi PDF'e eklendi
+        if summary_data.get('mkt_val'):
+            self.set_font('Arial', 'I', 9)
+            self.cell(0, 6, tr_fix(f"Ortalama Kinetik Sicaklik (MKT): {summary_data['mkt_val']}"), ln=True)
+            self.ln(3)
+
         decision = summary_data.get('decision', '-')
-        self.set_font('Arial', 'B', 12)
-        self.cell(0, 12, tr_fix(f"KARAR: {decision}"), border=1, ln=True, align='C')
+        self.set_font('Arial', 'B', 11)
+        self.multi_cell(0, 8, tr_fix(f"KARAR: {decision}"), border=1, align='C')
         self.ln(5)
 
     def add_table(self, df):
@@ -165,7 +193,6 @@ def extract_metadata(file):
     try:
         lines = [file.readline().decode('ISO-8859-9').strip() for _ in range(HEADER_ROW + 2)]
         for line in lines:
-            # Hem ; hem , ayracını destekle
             if ';' in line:
                 parts = line.split(';')
             else:
@@ -189,15 +216,12 @@ def analyze_data(file):
     file.seek(0)
     try:
         try:
-            # sep=None ve engine='python' ile otomatik ayraç tespiti
             df = pd.read_csv(file, header=HEADER_ROW, sep=None, engine='python', encoding='utf-8')
         except UnicodeDecodeError:
             file.seek(0) 
             df = pd.read_csv(file, header=HEADER_ROW, sep=None, engine='python', encoding='ISO-8859-9')
         
-        # Boş sütunları temizle (Unnamed vb)
         df = df.dropna(axis=1, how='all')
-        
         df.columns = df.columns.str.strip()
         upper_cols = [c.upper() for c in df.columns]
         
@@ -255,7 +279,6 @@ if uploaded_file is not None:
         gap_threshold = timedelta(hours=gap_threshold_hours)
         all_gaps = []
 
-        # A) Zaman Farkı
         df['TimeDiff'] = df['Timestamp'].diff()
         df['PrevTimestamp'] = df['Timestamp'].shift(1)
         internal_gaps = df[df['TimeDiff'] >= gap_threshold].copy()
@@ -267,7 +290,6 @@ if uploaded_file is not None:
                 "Sure": row['TimeDiff']
             })
 
-        # B) Başlangıç/Bitiş Kaybı
         if pd.notna(meta_start_dt):
             first_data_time = df['Timestamp'].min()
             start_diff = first_data_time - meta_start_dt
@@ -290,7 +312,6 @@ if uploaded_file is not None:
                     "Sure": end_diff
                 })
         
-        # C) Sıcaklık Verisi Yok
         df['IsMissingTemp'] = df['Temp'].isna()
         df['MissingGroup'] = (df['IsMissingTemp'] != df['IsMissingTemp'].shift()).cumsum()
         for _, group in df[df['IsMissingTemp']].groupby('MissingGroup'):
@@ -323,6 +344,9 @@ if uploaded_file is not None:
             df_decision_scope = df_clean[df_clean['Timestamp'] <= intervention_dt].copy()
         else:
             df_decision_scope = df_clean.copy()
+
+        # Ortalama Kinetik Sıcaklık (MKT) Hesaplaması
+        mkt_value = calculate_mkt(df_decision_scope['Temp'])
 
         # 1. 0 Derece Altı Süresi
         df_decision_scope['IsFreezing'] = df_decision_scope['Temp'] < 0
@@ -373,7 +397,7 @@ if uploaded_file is not None:
                 "En Uc Deger": extreme
             })
         
-        # --- KARAR MANTIĞI ---
+        # --- MKT BAZLI AKILLI KARAR MANTIĞI ---
         decision_msg = "MANUEL KONTROL GEREKLI (Ara Deger)"
         check_dur_hours = total_max_duration.total_seconds() / 3600
         check_max_val = global_max_val if global_max_val is not None else 0 
@@ -381,9 +405,14 @@ if uploaded_file is not None:
         if total_above_20_duration >= timedelta(hours=2):
              decision_msg = "IMHA ONERILIR (KRITIK SICAKLIK > 20C VE SURE > 2 Saat)"
         elif total_below_zero_duration >= timedelta(minutes=30):
-             decision_msg = "IMHA ONERILIR (dondurulabilir aşılar hariç)"
+             decision_msg = "IMHA ONERILIR (dondurulabilir asilar haric)"
         elif check_dur_hours >= 8 and check_max_val >= 15:
             decision_msg = "IMHA ONERILIR (SURE > 8s VE ISI > 15C)"
+        
+        # YENİ KURAL: Süre 8 saati geçmese bile, Ortalama Kinetik Sıcaklık üst limitin üzerindeyse Karantina.
+        elif check_dur_hours < 8 and (mkt_value is not None and mkt_value > max_temp_limit):
+            decision_msg = f"KARANTINA / RISK: Ihlal suresi 8 saati asmadi ama termal stres (MKT: {mkt_value:.2f}C) cok yuksek, urunun yapisi bozulmus olabilir!"
+        
         elif check_dur_hours < 8 and check_max_val < 15:
             decision_msg = "KULLANILABILIR ONERILIR"
         
@@ -393,6 +422,7 @@ if uploaded_file is not None:
             "max_val": f"{global_max_val} C" if global_max_val is not None else "-",
             "min_dur": format_duration(total_min_duration) if total_min_duration > timedelta(0) else "-",
             "min_val": f"{global_min_val} C" if global_min_val is not None else "-",
+            "mkt_val": f"{mkt_value:.2f} C" if mkt_value is not None else "-",
             "decision": decision_msg,
             "intervention": intervention_dt.strftime('%d.%m.%Y %H:%M') if (has_intervention and intervention_dt) else None
         }
@@ -428,10 +458,12 @@ if uploaded_file is not None:
             st.markdown("### 🚦 Otomatik Değerlendirme")
             if "IMHA" in decision_msg:
                 st.error(f"🚨 **KARAR:** {decision_msg}")
+            elif "KARANTINA" in decision_msg:
+                st.warning(f"🧪 **KARAR:** {decision_msg}")
             elif "KULLANILABILIR" in decision_msg:
                 st.success(f"✅ **KARAR:** {decision_msg}")
             else:
-                st.warning(f"⚠️ **KARAR:** {decision_msg}")
+                st.info(f"⚠️ **KARAR:** {decision_msg}")
             
             if has_intervention and intervention_dt:
                 st.caption(f"ℹ️ Hesaplamalar **{intervention_dt.strftime('%d.%m.%Y %H:%M')}** öncesi verilere göre yapılmıştır.")
@@ -439,11 +471,14 @@ if uploaded_file is not None:
             st.divider()
             
             # Özet Metrikler
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric("Toplam Üst Limit Aşım", summary_stats["max_dur"])
             col2.metric("En Yüksek Sıcaklık", summary_stats["max_val"])
             col3.metric("Toplam Alt Limit Aşım", summary_stats["min_dur"])
             col4.metric("En Düşük Sıcaklık", summary_stats["min_val"])
+            if mkt_value is not None:
+                col5.metric("Kinetik Sıcaklık (MKT)", f"{mkt_value:.2f} °C", 
+                            help="Aşıların maruz kaldığı toplam termal stresi logaritmik olarak ölçer.")
             
             if not df_violations.empty:
                 st.dataframe(df_violations, use_container_width=True)
@@ -456,9 +491,12 @@ if uploaded_file is not None:
         
         with tab3:
             st.subheader("Kestirimci Bakım & İstatistik Analizi")
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns(4)
             c1.metric("Genel Ortalama", f"{df_clean['Temp'].mean():.2f} °C")
             c2.metric("Genel Std. Sapma", f"{df_clean['Temp'].std():.2f} °C")
+            
+            if mkt_value is not None:
+                c3.metric("Ort. Kinetik Sıc. (MKT)", f"{mkt_value:.2f} °C")
             
             trend_msg = "Veri yetersiz."
             trend_color = "off"
@@ -472,7 +510,7 @@ if uploaded_file is not None:
                 else:
                     trend_msg = "✅ STABİL"
                     trend_color = "normal"
-            c3.metric("Trend", f"{slope:.4f}", delta=trend_msg, delta_color=trend_color)
+            c4.metric("Sıcaklık Trendi", f"{slope:.4f}", delta=trend_msg, delta_color=trend_color)
 
             col_g1, col_g2 = st.columns(2)
             with col_g1:
