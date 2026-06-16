@@ -4,7 +4,6 @@ import plotly.express as px
 import numpy as np
 from datetime import timedelta
 from fpdf import FPDF
-import io
 
 # --- Sayfa Ayarları ---
 st.set_page_config(page_title="Aşı Dolabı Analiz Raporu", layout="wide")
@@ -67,11 +66,9 @@ def calculate_mkt(temps_celsius):
     Gelen veriyi zorunlu olarak float'a çevirir ve boşlukları atar (Arrow hatasını önler).
     """
     temps = pd.to_numeric(temps_celsius, errors='coerce').dropna()
-    
     if temps.empty:
         return None
-        
-    # Sıcaklıkları Kelvin'e çevir (.values kullanımı Pandas Arrow hatasını engeller)
+    
     temps_kelvin = temps.values + 273.15
     dh_r = 10000 
     
@@ -85,7 +82,7 @@ def calculate_mkt(temps_celsius):
     mkt_celsius = mkt_kelvin - 273.15
     return mkt_celsius
 
-# --- PDF Sınıfı ---
+# --- PDF Sınıfı ve Oluşturucu ---
 class ReportPDF(FPDF):
     def __init__(self, metadata, report_title):
         super().__init__()
@@ -183,6 +180,15 @@ class ReportPDF(FPDF):
                 text = tr_fix(str(item))
                 self.cell(col_width, 7, text, border=1, align='C')
             self.ln()
+
+# Eksik olan fonksiyon eklendi!
+def create_pdf_bytes(df, metadata, title, violation_summary=None):
+    pdf = ReportPDF(metadata, title)
+    pdf.add_page()
+    if violation_summary:
+        pdf.add_violation_summary(violation_summary)
+    pdf.add_table(df)
+    return pdf.output(dest='S').encode('latin-1', 'ignore')
 
 # --- Veri Ayrıştırma Modülü ---
 def extract_metadata_from_text(text):
@@ -301,7 +307,6 @@ def analyze_data(file):
         else:
             df['Temp'] = pd.to_numeric(df[temp_col], errors='coerce')
             
-        # Hem Tarihi hem de Sıcaklık verisi tam olan satırları filtrele ve sırala
         df = df.dropna(subset=['Timestamp', 'Temp']).sort_values('Timestamp')
 
         return df, metadata, ""
