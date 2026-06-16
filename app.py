@@ -4,6 +4,7 @@ import plotly.express as px
 import numpy as np
 from datetime import timedelta
 from fpdf import FPDF
+import io
 
 # --- Sayfa Ayarları ---
 st.set_page_config(page_title="Aşı Dolabı Analiz Raporu", layout="wide")
@@ -13,7 +14,8 @@ st.markdown("Yüklenen sensör verilerini analiz eder; kesintileri, ihlalleri, t
 
 # --- Ayarlar Sidebar ---
 st.sidebar.header("⚙️ Analiz Ayarları")
-uploaded_file = st.sidebar.file_uploader("CSV Dosyası Yükle", type=["csv"])
+# Hem CSV hem Excel desteği eklendi
+uploaded_file = st.sidebar.file_uploader("CSV veya Excel Dosyası Yükle", type=["csv", "xlsx", "xls"])
 
 st.sidebar.divider()
 st.sidebar.subheader("Limitler")
@@ -35,7 +37,6 @@ if has_intervention:
 
 # --- Yardımcı Fonksiyonlar ---
 def tr_fix(text):
-    """FPDF için Türkçe karakter düzeltmesi"""
     if not isinstance(text, str):
         return str(text)
     mapping = {
@@ -59,11 +60,9 @@ def parse_metadata_date(date_str):
         return None
 
 def format_duration(td):
-    """Timedelta'yı okunabilir string'e çevirir"""
     return str(td).split('.')[0]
 
 def calculate_mkt(temps_celsius):
-    """Arrhenius denklemine dayalı Ortalama Kinetik Sıcaklık (MKT) Hesabı"""
     if temps_celsius.empty:
         return None
     temps_kelvin = temps_celsius + 273.15
@@ -175,26 +174,22 @@ class ReportPDF(FPDF):
                 self.cell(col_width, 7, text, border=1, align='C')
             self.ln()
 
-# --- Veri Okuma (Dinamik Format Desteğiyle) ---
-def extract_metadata(file):
-    file.seek(0)
+# --- Veri Okuma ve Ayrıştırma İşlemleri ---
+def extract_metadata_csv(file_bytes):
     meta = {}
     try:
-        content = file.read(4096)
         try:
-            text = content.decode('utf-8')
+            text = file_bytes.decode('utf-8')
         except UnicodeDecodeError:
-            text = content.decode('ISO-8859-9')
+            text = file_bytes.decode('ISO-8859-9')
             
         lines = text.split('\n')
-        for line in lines:
-            # Hem virgüllü hem noktalı virgüllü ayraçları destekler
+        for line in lines[:50]: # İlk 50 satırı tara
             parts = [p.strip().replace('"', '') for p in line.replace(';', ',').split(',')]
             for i in range(len(parts)-1):
                 key = parts[i].upper()
                 val = parts[i+1]
                 
-                # Değer boşsa bir sonraki dolu hücreyi arar
                 if not val:
                     for j in range(i+1, len(parts)):
                         if parts[j]:
@@ -202,65 +197,106 @@ def extract_metadata(file):
                             break
                 if not val: continue
                 
-                if key == "BİRİM" or key == "BIRIM": meta['Birim'] = val
-                elif key == "DEPO": meta['Depo'] = val
-                elif key == "STOK BİRİMİ" or key == "STOK BIRIMI": meta['Stok'] = val
-                elif key == "BAŞLANGIÇ" or key == "BASLANGIC": meta['Baslangic'] = val
-                elif key == "BİTİŞ" or key == "BITIS": meta['Bitis'] = val
+                if "BİRİM" == key or "BIRIM" == key: meta['Birim'] = val
+                elif "DEPO" == key: meta['Depo'] = val
+                elif "STOK BİRİMİ" in key or "STOK BIRIMI" in key: meta['Stok'] = val
+                elif "BAŞLANGIÇ" in key or "BASLANGIC" in key: meta['Baslangic'] = val
+                elif "BİTİŞ" in key or "BITIS" in key: meta['Bitis'] = val
     except Exception as e:
         pass
     return meta
 
 def analyze_data(file):
-    metadata = extract_metadata(file)
-    file.seek(0)
+    filename = file.name.lower()
+    metadata = {}
+    df = None
     
     try:
-        # 1. Başlık (Header) satırını dinamik olarak bul
-        header_idx = 0
-        try:
-            text = file.read(5000).decode('utf-8')
-        except UnicodeDecodeError:
+        # EXCEL İŞLEME (.xlsx, .xls)
+        if filename.endswith('.xlsx') or filename.endswith('.xls'):
             file.seek(0)
-            text = file.read(5000).decode('ISO-8859-9')
+            df_raw = pd.read_excel(file, header=None)
             
-        lines = text.split('\n')
-        for idx, line in enumerate(lines):
-            upper_line = line.upper()
-            if "SICAKLIK" in upper_line and ("ZAMAN" in upper_line or "TARİH" in upper_line or "TARIH" in upper_line or "DATE" in upper_line):
-                header_idx = idx
-                break
+            header_idx = 0
+            # Üst bilgileri ve başlık satırını bul (İlk 30 satır taranır)
+            for i in range(min(30, len(df_raw))):
+                row_values_raw = df_raw.iloc[i].tolist()
+                row_values_upper = [str(x).strip().upper() if not pd.isna(x) else "" for x in row_values_raw]
                 
-        file.seek(0)
-        try:
-            df = pd.read_csv(file, header=header_idx, sep=None, engine='python', encoding='utf-8')
-        except UnicodeDecodeError:
+                # Başlık tespiti
+                if any("SICAKLIK" in val for val in row_values_upper) and any(("ZAMAN" in val or "TARİH" in val or "TARIH" in val or "DATE" in val) for val in row_values_upper):
+                    header_idx = i
+                
+                # Metadata tespiti
+                for j, val in enumerate(row_values_upper):
+                    if val:
+                        key = val
+                        next_val = ""
+                        for k in range(j+1, len(row_values_raw)):
+                            if not pd.isna(row_values_raw[k]) and str(row_values_raw[k]).strip():
+                                next_val = str(row_values_raw[k]).strip()
+                                break
+                        
+                        if next_val:
+                            if key == "BİRİM" or key == "BIRIM": metadata['Birim'] = next_val
+                            elif key == "DEPO": metadata['Depo'] = next_val
+                            elif "STOK BİRİMİ" in key or "STOK BIRIMI" in key: metadata['Stok'] = next_val
+                            elif "BAŞLANGIÇ" in key or "BASLANGIC" in key: metadata['Baslangic'] = next_val
+                            elif "BİTİŞ" in key or "BITIS" in key: metadata['Bitis'] = next_val
+            
+            # Başlık bulunduktan sonra veriyi tekrar yapılandır
             file.seek(0)
-            df = pd.read_csv(file, header=header_idx, sep=None, engine='python', encoding='ISO-8859-9')
-        
-        # Boş sütunları sil ve adları temizle
+            df = pd.read_excel(file, header=header_idx)
+
+        # CSV İŞLEME (.csv)
+        else:
+            file.seek(0)
+            file_bytes = file.read(5000)
+            metadata = extract_metadata_csv(file_bytes)
+            
+            try:
+                text = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                text = file_bytes.decode('ISO-8859-9')
+                
+            header_idx = 0
+            lines = text.split('\n')
+            for idx, line in enumerate(lines):
+                upper_line = line.upper()
+                if "SICAKLIK" in upper_line and ("ZAMAN" in upper_line or "TARİH" in upper_line or "TARIH" in upper_line or "DATE" in upper_line):
+                    header_idx = idx
+                    break
+                    
+            file.seek(0)
+            try:
+                df = pd.read_csv(file, header=header_idx, sep=None, engine='python', encoding='utf-8')
+            except UnicodeDecodeError:
+                file.seek(0)
+                df = pd.read_csv(file, header=header_idx, sep=None, engine='python', encoding='ISO-8859-9')
+
+        # ORTAK VERİ TEMİZLİĞİ (Hem CSV Hem Excel İçin)
         df = df.dropna(axis=1, how='all')
-        df.columns = df.columns.str.strip()
+        df.columns = df.columns.astype(str).str.strip()
         upper_cols = [c.upper() for c in df.columns]
         
         time_col = None
         temp_col = None
 
-        # 2. İlgili kolonları esnek bir şekilde tespit et
         for i, col in enumerate(upper_cols):
             if "ZAMAN" in col or "DATE" in col or "ÖLÇÜM TAR" in col or "OLCUM TAR" in col: 
                 time_col = df.columns[i]
             if "SICAKLIK" in col or "TEMP" in col:
-                # "Sıcaklık Takip Cihazı" gibi yanıltıcı kolonları atla
+                # "Sıcaklık Takip Cihazı" gibi yanıltıcı isimli kolonları yoksay
                 if "CİHAZI" not in col and "CIHAZI" not in col:
                     temp_col = df.columns[i]
         
         if not time_col or not temp_col: return None, None
 
+        # Tarih İşlemi
         df['Timestamp'] = pd.to_datetime(df[time_col], dayfirst=True, errors='coerce')
         df = df.dropna(subset=['Timestamp']).sort_values('Timestamp')
 
-        # 3. Yeni format sıcaklık değerini (Örn: "6.03 °C" veya "5,19") temizle ve float yap
+        # Sıcaklık Verisi İşlemi ("6.03 °C" -> 6.03)
         if df[temp_col].dtype == object:
             df['Temp'] = df[temp_col].astype(str).str.replace('°C', '').str.replace('C', '').str.replace(',', '.').str.strip()
             df['Temp'] = pd.to_numeric(df['Temp'], errors='coerce')
@@ -269,16 +305,8 @@ def analyze_data(file):
 
         return df, metadata
 
-    except Exception:
+    except Exception as e:
         return None, None
-
-def create_pdf_bytes(df, metadata, title, violation_summary=None):
-    pdf = ReportPDF(metadata, title)
-    pdf.add_page()
-    if violation_summary:
-        pdf.add_violation_summary(violation_summary)
-    pdf.add_table(df)
-    return pdf.output(dest='S').encode('latin-1', 'ignore')
 
 # --- ANA AKIŞ ---
 if uploaded_file is not None:
@@ -351,11 +379,9 @@ if uploaded_file is not None:
                     "Sure": dur
                 })
         
-        # En büyük kesintiyi bulma (Karar kapsamındaki kör noktayı saptamak için)
         valid_gaps = []
         for gap in all_gaps:
             gap_start = gap["Baslangic"]
-            # Eğer müdahale (transfer) varsa ve bu boşluk müdahaleden SONRA başlıyorsa yoksay
             if has_intervention and intervention_dt and gap_start >= intervention_dt:
                 continue
             valid_gaps.append(gap["Sure"])
@@ -365,7 +391,6 @@ if uploaded_file is not None:
         else:
             max_gap_td = timedelta(0)
 
-        # Tablo Gösterimi İçin Formatlama
         if all_gaps:
             df_gaps_report = pd.DataFrame(all_gaps).sort_values('Baslangic')
             df_gaps_report['Baslangic'] = df_gaps_report['Baslangic'].apply(lambda x: x.strftime('%d.%m.%Y %H:%M:%S'))
@@ -379,30 +404,25 @@ if uploaded_file is not None:
         # --- 2. SICAKLIK İHLALİ ve KARAR ---
         df_clean = df.dropna(subset=['Temp']).copy()
 
-        # Müdahale Filtresi (KARAR VERİLERİ İÇİN)
         if has_intervention and intervention_dt:
             df_decision_scope = df_clean[df_clean['Timestamp'] <= intervention_dt].copy()
         else:
             df_decision_scope = df_clean.copy()
 
-        # Ortalama Kinetik Sıcaklık (MKT) Hesaplaması
         mkt_value = calculate_mkt(df_decision_scope['Temp'])
 
-        # 1. 0 Derece Altı Süresi
         df_decision_scope['IsFreezing'] = df_decision_scope['Temp'] < 0
         df_decision_scope['FreezeGroup'] = (df_decision_scope['IsFreezing'] != df_decision_scope['IsFreezing'].shift()).cumsum()
         total_below_zero_duration = timedelta(0)
         for _, grp in df_decision_scope[df_decision_scope['IsFreezing']].groupby('FreezeGroup'):
             total_below_zero_duration += (grp['Timestamp'].max() - grp['Timestamp'].min())
 
-        # 2. 20 Derece Üzeri Süresi
         df_decision_scope['IsCriticalHeat'] = df_decision_scope['Temp'] > 20
         df_decision_scope['HeatGroup'] = (df_decision_scope['IsCriticalHeat'] != df_decision_scope['IsCriticalHeat'].shift()).cumsum()
         total_above_20_duration = timedelta(0)
         for _, grp in df_decision_scope[df_decision_scope['IsCriticalHeat']].groupby('HeatGroup'):
             total_above_20_duration += (grp['Timestamp'].max() - grp['Timestamp'].min())
 
-        # 3. Limit İhlalleri
         df_decision_scope['Status'] = 0 
         df_decision_scope.loc[df_decision_scope['Temp'] < min_temp_limit, 'Status'] = -1
         df_decision_scope.loc[df_decision_scope['Temp'] > max_temp_limit, 'Status'] = 1
@@ -437,26 +457,21 @@ if uploaded_file is not None:
                 "En Uc Deger": extreme
             })
         
-        # --- AKILLI KARAR MANTIĞI (Öncelik Sırasıyla) ---
+        # --- AKILLI KARAR MANTIĞI ---
         decision_msg = "MANUEL KONTROL GEREKLI (Ara Deger)"
         check_dur_hours = total_max_duration.total_seconds() / 3600
         check_max_val = global_max_val if global_max_val is not None else 0 
         
         if total_above_20_duration >= timedelta(hours=2):
              decision_msg = "IMHA ONERILIR (KRITIK SICAKLIK > 20C VE SURE > 2 Saat)"
-             
         elif total_below_zero_duration >= timedelta(minutes=30):
              decision_msg = "IMHA ONERILIR (dondurulabilir asilar haric)"
-             
         elif check_dur_hours >= 8 and check_max_val >= 15:
             decision_msg = "IMHA ONERILIR (SURE > 8s VE ISI > 15C)"
-            
         elif max_gap_td >= gap_threshold:
             decision_msg = f"KARANTINA / RISK: Cihazda {format_duration(max_gap_td)} sureli veri kesintisi (kor nokta) tespit edildi!"
-            
         elif check_dur_hours < 8 and (mkt_value is not None and mkt_value > max_temp_limit):
             decision_msg = f"KARANTINA / RISK: Ihlal suresi 8 saati asmadi ama termal stres (MKT: {mkt_value:.2f}C) cok yuksek!"
-            
         elif check_dur_hours < 8 and check_max_val < 15:
             decision_msg = "KULLANILABILIR ONERILIR"
         
@@ -498,7 +513,6 @@ if uploaded_file is not None:
         with tab2:
             st.subheader("Sıcaklık İhlal Raporu")
             
-            # Karar Kutusu
             st.markdown("### 🚦 Otomatik Değerlendirme")
             if "IMHA" in decision_msg:
                 st.error(f"🚨 **KARAR:** {decision_msg}")
@@ -514,7 +528,6 @@ if uploaded_file is not None:
 
             st.divider()
             
-            # Özet Metrikler
             col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric("Toplam Üst Limit Aşım", summary_stats["max_dur"])
             col2.metric("En Yüksek Sıcaklık", summary_stats["max_val"])
@@ -571,5 +584,7 @@ if uploaded_file is not None:
 
             st.dataframe(daily_stats, use_container_width=True)
 
+    else:
+        st.error("Dosya içeriği okunamadı. Lütfen geçerli bir ölçüm raporu yüklediğinizden emin olun.")
 else:
     st.info("Lütfen CSV veya Excel uzantılı dosyanızı yükleyin.")
