@@ -20,7 +20,6 @@ st.sidebar.subheader("Limitler")
 gap_threshold_hours = st.sidebar.number_input("Kesinti Limiti (Saat)", min_value=1, value=2)
 min_temp_limit = st.sidebar.number_input("Min Sıcaklık (°C)", value=2.0)
 max_temp_limit = st.sidebar.number_input("Max Sıcaklık (°C)", value=8.0)
-HEADER_ROW = 8 
 
 st.sidebar.divider()
 st.sidebar.subheader("Müdahale / Transfer Durumu")
@@ -176,33 +175,38 @@ class ReportPDF(FPDF):
                 self.cell(col_width, 7, text, border=1, align='C')
             self.ln()
 
-# --- Veri Okuma ---
+# --- Veri Okuma (Dinamik Format Desteğiyle) ---
 def extract_metadata(file):
     file.seek(0)
     meta = {}
     try:
+        content = file.read(4096)
         try:
-            lines = [file.readline().decode('utf-8').strip() for _ in range(HEADER_ROW + 2)]
+            text = content.decode('utf-8')
         except UnicodeDecodeError:
-            file.seek(0)
-            lines = [file.readline().decode('ISO-8859-9').strip() for _ in range(HEADER_ROW + 2)]
+            text = content.decode('ISO-8859-9')
             
+        lines = text.split('\n')
         for line in lines:
-            if ';' in line:
-                parts = line.split(';')
-            else:
-                parts = line.split(',')
+            # Hem virgüllü hem noktalı virgüllü ayraçları destekler
+            parts = [p.strip().replace('"', '') for p in line.replace(';', ',').split(',')]
+            for i in range(len(parts)-1):
+                key = parts[i].upper()
+                val = parts[i+1]
                 
-            clean_parts = [p.strip().replace('"', '') for p in parts if p.strip()]
-            if len(clean_parts) >= 2:
-                # Key'i tamamen büyük harfe çevirip eşleştirme kalitesini artırdık
-                key = clean_parts[0].upper()
-                val = clean_parts[1]
-                if "BİRİM" in key or "BIRIM" in key and "STOK" not in key: meta['Birim'] = val
-                elif "DEPO" in key: meta['Depo'] = val
-                elif "STOK" in key: meta['Stok'] = val
-                elif "BASLANG" in key or "BAŞLANG" in key: meta['Baslangic'] = val
-                elif "BITIS" in key or "BİTİŞ" in key: meta['Bitis'] = val
+                # Değer boşsa bir sonraki dolu hücreyi arar
+                if not val:
+                    for j in range(i+1, len(parts)):
+                        if parts[j]:
+                            val = parts[j]
+                            break
+                if not val: continue
+                
+                if key == "BİRİM" or key == "BIRIM": meta['Birim'] = val
+                elif key == "DEPO": meta['Depo'] = val
+                elif key == "STOK BİRİMİ" or key == "STOK BIRIMI": meta['Stok'] = val
+                elif key == "BAŞLANGIÇ" or key == "BASLANGIC": meta['Baslangic'] = val
+                elif key == "BİTİŞ" or key == "BITIS": meta['Bitis'] = val
     except Exception as e:
         pass
     return meta
@@ -210,13 +214,31 @@ def extract_metadata(file):
 def analyze_data(file):
     metadata = extract_metadata(file)
     file.seek(0)
+    
     try:
+        # 1. Başlık (Header) satırını dinamik olarak bul
+        header_idx = 0
         try:
-            df = pd.read_csv(file, header=HEADER_ROW, sep=None, engine='python', encoding='utf-8')
+            text = file.read(5000).decode('utf-8')
         except UnicodeDecodeError:
-            file.seek(0) 
-            df = pd.read_csv(file, header=HEADER_ROW, sep=None, engine='python', encoding='ISO-8859-9')
+            file.seek(0)
+            text = file.read(5000).decode('ISO-8859-9')
+            
+        lines = text.split('\n')
+        for idx, line in enumerate(lines):
+            upper_line = line.upper()
+            if "SICAKLIK" in upper_line and ("ZAMAN" in upper_line or "TARİH" in upper_line or "TARIH" in upper_line or "DATE" in upper_line):
+                header_idx = idx
+                break
+                
+        file.seek(0)
+        try:
+            df = pd.read_csv(file, header=header_idx, sep=None, engine='python', encoding='utf-8')
+        except UnicodeDecodeError:
+            file.seek(0)
+            df = pd.read_csv(file, header=header_idx, sep=None, engine='python', encoding='ISO-8859-9')
         
+        # Boş sütunları sil ve adları temizle
         df = df.dropna(axis=1, how='all')
         df.columns = df.columns.str.strip()
         upper_cols = [c.upper() for c in df.columns]
@@ -224,17 +246,24 @@ def analyze_data(file):
         time_col = None
         temp_col = None
 
+        # 2. İlgili kolonları esnek bir şekilde tespit et
         for i, col in enumerate(upper_cols):
-            if "ZAMAN" in col or "DATE" in col: time_col = df.columns[i]
-            if "SICAKLIK" in col or "TEMP" in col: temp_col = df.columns[i]
+            if "ZAMAN" in col or "DATE" in col or "ÖLÇÜM TAR" in col or "OLCUM TAR" in col: 
+                time_col = df.columns[i]
+            if "SICAKLIK" in col or "TEMP" in col:
+                # "Sıcaklık Takip Cihazı" gibi yanıltıcı kolonları atla
+                if "CİHAZI" not in col and "CIHAZI" not in col:
+                    temp_col = df.columns[i]
         
         if not time_col or not temp_col: return None, None
 
         df['Timestamp'] = pd.to_datetime(df[time_col], dayfirst=True, errors='coerce')
         df = df.dropna(subset=['Timestamp']).sort_values('Timestamp')
 
+        # 3. Yeni format sıcaklık değerini (Örn: "6.03 °C" veya "5,19") temizle ve float yap
         if df[temp_col].dtype == object:
-            df['Temp'] = df[temp_col].str.replace(',', '.').astype(float)
+            df['Temp'] = df[temp_col].astype(str).str.replace('°C', '').str.replace('C', '').str.replace(',', '.').str.strip()
+            df['Temp'] = pd.to_numeric(df['Temp'], errors='coerce')
         else:
             df['Temp'] = df[temp_col]
 
@@ -543,4 +572,4 @@ if uploaded_file is not None:
             st.dataframe(daily_stats, use_container_width=True)
 
 else:
-    st.info("Lütfen CSV dosyasını yükleyin.")
+    st.info("Lütfen CSV veya Excel uzantılı dosyanızı yükleyin.")
