@@ -4,6 +4,7 @@ import plotly.express as px
 import numpy as np
 from datetime import timedelta
 from fpdf import FPDF
+import io
 
 # --- Sayfa Ayarları ---
 st.set_page_config(page_title="Aşı Dolabı Analiz Raporu", layout="wide")
@@ -61,14 +62,25 @@ def format_duration(td):
     return str(td).split('.')[0]
 
 def calculate_mkt(temps_celsius):
-    if temps_celsius.empty:
+    """
+    Arrhenius denklemine dayalı Ortalama Kinetik Sıcaklık (MKT) Hesabı.
+    Gelen veriyi zorunlu olarak float'a çevirir ve boşlukları atar (Arrow hatasını önler).
+    """
+    temps = pd.to_numeric(temps_celsius, errors='coerce').dropna()
+    
+    if temps.empty:
         return None
-    temps_kelvin = temps_celsius + 273.15
+        
+    # Sıcaklıkları Kelvin'e çevir (.values kullanımı Pandas Arrow hatasını engeller)
+    temps_kelvin = temps.values + 273.15
     dh_r = 10000 
+    
     exp_terms = np.exp(-dh_r / temps_kelvin)
     avg_exp = exp_terms.mean()
+    
     if avg_exp == 0:
         return None
+        
     mkt_kelvin = dh_r / (-np.log(avg_exp))
     mkt_celsius = mkt_kelvin - 273.15
     return mkt_celsius
@@ -251,10 +263,8 @@ def analyze_data(file):
                     
             file.seek(0)
             try:
-                # 1. Standart Virgül Ayracı İle Dene
                 df = pd.read_csv(file, header=header_idx, sep=',', encoding=enc)
                 if len(df.columns) < 2:
-                    # 2. Noktalı Virgül İle Dene
                     file.seek(0)
                     df = pd.read_csv(file, header=header_idx, sep=';', encoding=enc)
             except Exception as e:
@@ -275,7 +285,6 @@ def analyze_data(file):
             if "ZAMAN" in col or "DATE" in col or "ÖLÇÜM TAR" in col or "OLCUM TAR" in col: 
                 time_col = df.columns[i]
             if "SICAKLIK" in col or "TEMP" in col:
-                # Yanlış kolonlara gitmemek için
                 if "CİHAZI" not in col and "CIHAZI" not in col:
                     temp_col = df.columns[i]
         
@@ -284,14 +293,16 @@ def analyze_data(file):
 
         # Tarih Dönüşümü
         df['Timestamp'] = pd.to_datetime(df[time_col], dayfirst=True, errors='coerce')
-        df = df.dropna(subset=['Timestamp']).sort_values('Timestamp')
-
-        # Sıcaklık Dönüşümü: Regex ile derece işaretini, harfleri temizle ve virgülü noktaya çevir
+        
+        # Sıcaklık Dönüşümü (Regex ile derece sembollerini ve metinleri temizle)
         if df[temp_col].dtype == object:
             df['Temp'] = df[temp_col].astype(str).str.replace(r'[^\d.,-]', '', regex=True).str.replace(',', '.')
             df['Temp'] = pd.to_numeric(df['Temp'], errors='coerce')
         else:
-            df['Temp'] = df[temp_col]
+            df['Temp'] = pd.to_numeric(df[temp_col], errors='coerce')
+            
+        # Hem Tarihi hem de Sıcaklık verisi tam olan satırları filtrele ve sırala
+        df = df.dropna(subset=['Timestamp', 'Temp']).sort_values('Timestamp')
 
         return df, metadata, ""
 
@@ -355,20 +366,6 @@ if uploaded_file is not None:
                     "Sure": end_diff
                 })
         
-        df['IsMissingTemp'] = df['Temp'].isna()
-        df['MissingGroup'] = (df['IsMissingTemp'] != df['IsMissingTemp'].shift()).cumsum()
-        for _, group in df[df['IsMissingTemp']].groupby('MissingGroup'):
-            s_t = group['Timestamp'].min()
-            e_t = group['Timestamp'].max()
-            dur = e_t - s_t
-            if dur >= gap_threshold:
-                all_gaps.append({
-                    "Tip": "Sicaklik Verisi Yok",
-                    "Baslangic": s_t,
-                    "Bitis": e_t,
-                    "Sure": dur
-                })
-        
         valid_gaps = []
         for gap in all_gaps:
             gap_start = gap["Baslangic"]
@@ -391,7 +388,7 @@ if uploaded_file is not None:
             df_gaps_report = pd.DataFrame()
 
         # --- 2. SICAKLIK İHLALİ ve KARAR ---
-        df_clean = df.dropna(subset=['Temp']).copy()
+        df_clean = df.copy()
 
         if has_intervention and intervention_dt:
             df_decision_scope = df_clean[df_clean['Timestamp'] <= intervention_dt].copy()
