@@ -4,6 +4,7 @@ import plotly.express as px
 import numpy as np
 from datetime import timedelta
 from fpdf import FPDF
+import io
 
 # --- Sayfa Ayarları ---
 st.set_page_config(page_title="Aşı Dolabı Analiz Raporu", layout="wide")
@@ -45,6 +46,11 @@ def tr_fix(text):
         text = text.replace(k, v)
     return text
 
+def normalize_str(s):
+    """Türkçe karakterleri güvenli bir şekilde standartlaştırır"""
+    if not isinstance(s, str): return ""
+    return s.replace('ı','i').replace('İ','I').replace('ğ','g').replace('Ğ','G').replace('ş','s').replace('Ş','S').replace('ö','o').replace('Ö','O').replace('ç','c').replace('Ç','C').upper()
+
 def parse_metadata_date(date_str):
     try:
         if not date_str or pd.isna(date_str):
@@ -61,10 +67,6 @@ def format_duration(td):
     return str(td).split('.')[0]
 
 def calculate_mkt(temps_celsius):
-    """
-    Arrhenius denklemine dayalı Ortalama Kinetik Sıcaklık (MKT) Hesabı.
-    Gelen veriyi zorunlu olarak float'a çevirir ve boşlukları atar (Arrow hatasını önler).
-    """
     temps = pd.to_numeric(temps_celsius, errors='coerce').dropna()
     if temps.empty:
         return None
@@ -181,7 +183,6 @@ class ReportPDF(FPDF):
                 self.cell(col_width, 7, text, border=1, align='C')
             self.ln()
 
-# Eksik olan fonksiyon eklendi!
 def create_pdf_bytes(df, metadata, title, violation_summary=None):
     pdf = ReportPDF(metadata, title)
     pdf.add_page()
@@ -190,7 +191,7 @@ def create_pdf_bytes(df, metadata, title, violation_summary=None):
     pdf.add_table(df)
     return pdf.output(dest='S').encode('latin-1', 'ignore')
 
-# --- Veri Ayrıştırma Modülü ---
+# --- Gelişmiş Veri Ayrıştırma Modülü ---
 def extract_metadata_from_text(text):
     meta = {}
     try:
@@ -198,7 +199,7 @@ def extract_metadata_from_text(text):
         for line in lines[:50]:
             parts = [p.strip().replace('"', '') for p in line.replace(';', ',').split(',')]
             for i in range(len(parts)-1):
-                key = parts[i].upper()
+                key = normalize_str(parts[i])
                 val = parts[i+1]
                 
                 if not val:
@@ -208,11 +209,11 @@ def extract_metadata_from_text(text):
                             break
                 if not val: continue
                 
-                if "BİRİM" == key or "BIRIM" == key: meta['Birim'] = val
+                if "BIRIM" == key: meta['Birim'] = val
                 elif "DEPO" == key: meta['Depo'] = val
-                elif "STOK BİRİMİ" in key or "STOK BIRIMI" in key: meta['Stok'] = val
-                elif "BAŞLANGIÇ" in key or "BASLANGIC" in key: meta['Baslangic'] = val
-                elif "BİTİŞ" in key or "BITIS" in key: meta['Bitis'] = val
+                elif "STOK BIRIMI" in key: meta['Stok'] = val
+                elif "BASLANGIC" in key: meta['Baslangic'] = val
+                elif "BITIS" in key: meta['Bitis'] = val
     except:
         pass
     return meta
@@ -221,86 +222,93 @@ def analyze_data(file):
     filename = file.name.lower()
     metadata = {}
     df = None
-    err_msg = ""
     
     try:
         # EXCEL FORMATI İÇİN
-        if filename.endswith('.xlsx') and not filename.endswith('.csv'):
+        if filename.endswith(('.xlsx', '.xls')) and not filename.endswith('.csv'):
             try:
-                file.seek(0)
                 df_raw = pd.read_excel(file, header=None)
-                
                 header_idx = 0
                 for i in range(min(30, len(df_raw))):
-                    row_values_upper = [str(x).strip().upper() if pd.notna(x) else "" for x in df_raw.iloc[i].tolist()]
-                    
-                    if any("SICAKLIK" in val for val in row_values_upper) and any(("ZAMAN" in val or "TARİH" in val or "TARIH" in val or "DATE" in val) for val in row_values_upper):
+                    row_values_upper = [normalize_str(x) for x in df_raw.iloc[i].tolist()]
+                    if any("SICAKLIK" in val for val in row_values_upper) and any(("ZAMAN" in val or "TARIH" in val) for val in row_values_upper):
                         header_idx = i
                         break
                         
                 file.seek(0)
                 df = pd.read_excel(file, header=header_idx)
-            except ImportError:
-                return None, {}, "Excel(.xlsx) okumak için 'openpyxl' paketi eksik."
             except Exception as e:
                 return None, {}, f"Excel okuma hatası: {str(e)}"
 
-        # CSV FORMATI İÇİN (Hem eski virgül hem noktalı virgül hem yeni format)
+        # CSV FORMATI İÇİN (Güçlendirilmiş Encoding ve Ayraç Algılama)
         else:
             file.seek(0)
-            file_bytes = file.read(10000)
+            raw_bytes = file.read(20000)
+            file.seek(0)
             
+            # Encoding Tespiti
             try:
-                text = file_bytes.decode('utf-8')
+                text = raw_bytes.decode('utf-8')
                 enc = 'utf-8'
             except UnicodeDecodeError:
-                text = file_bytes.decode('ISO-8859-9')
+                text = raw_bytes.decode('ISO-8859-9')
                 enc = 'ISO-8859-9'
                 
             metadata = extract_metadata_from_text(text)
             
             header_idx = 0
             lines = text.split('\n')
-            for idx, line in enumerate(lines):
-                upper_line = line.upper()
-                if "SICAKLIK" in upper_line and ("ZAMAN" in upper_line or "TARİH" in upper_line or "TARIH" in upper_line or "DATE" in upper_line):
+            for idx, line in enumerate(lines[:50]):
+                norm_line = normalize_str(line)
+                if "SICAKLIK" in norm_line and ("ZAMAN" in norm_line or "TARIH" in norm_line):
                     header_idx = idx
                     break
-                    
-            file.seek(0)
+            
+            # Ayraç (Delimiter) Tespiti
+            header_line = lines[header_idx]
+            sep = ';' if header_line.count(';') > header_line.count(',') else ','
+            
             try:
-                df = pd.read_csv(file, header=header_idx, sep=',', encoding=enc)
-                if len(df.columns) < 2:
-                    file.seek(0)
-                    df = pd.read_csv(file, header=header_idx, sep=';', encoding=enc)
+                df = pd.read_csv(file, header=header_idx, sep=sep, encoding=enc)
             except Exception as e:
                 return None, {}, f"CSV Yapısal Hata: {str(e)}"
 
-        # ORTAK KONTROLLER VE TEMİZLİK
+        # ORTAK KONTROLLER VE SÜTUN TESPİTİ
         if df is None or df.empty:
             return None, {}, "Dosya içinde okunabilir tablo verisi bulunamadı."
 
         df = df.dropna(axis=1, how='all')
         df.columns = df.columns.astype(str).str.strip()
-        upper_cols = [c.upper() for c in df.columns]
         
         time_col = None
         temp_col = None
 
-        for i, col in enumerate(upper_cols):
-            if "ZAMAN" in col or "DATE" in col or "ÖLÇÜM TAR" in col or "OLCUM TAR" in col: 
-                time_col = df.columns[i]
-            if "SICAKLIK" in col or "TEMP" in col:
-                if "CİHAZI" not in col and "CIHAZI" not in col:
-                    temp_col = df.columns[i]
+        # Akıllı Sütun Bulucu
+        for col in df.columns:
+            norm_col = normalize_str(col)
+            # Tarih Kolonunu bul (Kayıt Tarihini es geç, Ölçüm Tarihini önceliklendir)
+            if "ZAMAN" in norm_col or "TARIH" in norm_col:
+                if "KAYIT" not in norm_col: 
+                    time_col = col
+            # Sıcaklık Kolonunu bul (Cihaz/Sensör ID kolonlarını es geç)
+            if "SICAK" in norm_col or "TEMP" in norm_col:
+                if "CIHAZ" not in norm_col:
+                    temp_col = col
+                    
+        # Eğer hala Tarih kolonu bulunamadıysa ilk gördüğü tarihi alır
+        if not time_col:
+            for col in df.columns:
+                if "TARIH" in normalize_str(col): 
+                    time_col = col
+                    break
         
         if not time_col or not temp_col: 
-            return None, {}, f"Gerekli 'Tarih' veya 'Sıcaklık' kolonları bulunamadı. Bulunan kolonlar: {', '.join(df.columns)}"
+            return None, {}, f"Gerekli 'Tarih' veya 'Sıcaklık' kolonları bulunamadı.\nAlgılanan Sütunlar: {', '.join(df.columns)}"
 
         # Tarih Dönüşümü
         df['Timestamp'] = pd.to_datetime(df[time_col], dayfirst=True, errors='coerce')
         
-        # Sıcaklık Dönüşümü (Regex ile derece sembollerini ve metinleri temizle)
+        # Sıcaklık Dönüşümü (Regex ile "6.03 °C" -> 6.03)
         if df[temp_col].dtype == object:
             df['Temp'] = df[temp_col].astype(str).str.replace(r'[^\d.,-]', '', regex=True).str.replace(',', '.')
             df['Temp'] = pd.to_numeric(df['Temp'], errors='coerce')
