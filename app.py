@@ -107,7 +107,6 @@ class ReportPDF(FPDF):
         self.cell(40, 6, tr_fix("Stok Birimi:"), border=0)
         self.cell(0, 6, tr_fix(self.metadata.get('Stok', '-')), ln=True)
         
-        # Referans alınan dönem bilgisi
         if self.metadata.get('expected_start') and self.metadata.get('expected_end'):
             start_str = self.metadata['expected_start'].strftime('%d.%m.%Y %H:%M')
             end_str = self.metadata['expected_end'].strftime('%d.%m.%Y %H:%M')
@@ -182,7 +181,6 @@ def extract_metadata_from_text(text):
                 key = normalize_str(parts[i])
                 val = parts[i+1]
                 
-                # Başlıktaki DÖNEM (A5/B5 mantığı)
                 if "DONEM" in key and "-" in val:
                     d_parts = val.split("-")
                     meta['Baslangic'] = d_parts[0].strip()
@@ -281,14 +279,12 @@ def analyze_data(file):
         if not time_col or not temp_col: 
             return None, {}, f"Sıcaklık veya Tarih sütunu bulunamadı. Tespit Edilen Sütunlar: {', '.join(df.columns)}"
 
-        # Beklenen Başlangıç ve Bitiş (Dönem)
         metadata['expected_start'] = parse_date_robust(metadata.get('Baslangic'))
         metadata['expected_end'] = parse_date_robust(metadata.get('Bitis'))
 
         df['Timestamp'] = df[time_col].apply(parse_date_robust)
         df['Temp'] = df[temp_col].apply(parse_temp_robust)
             
-        # Boş sıcaklık verilerini sil (Bu durum otomatik olarak iki okuma arasını uzatarak kesinti yaratır)
         df = df.dropna(subset=['Timestamp', 'Temp']).sort_values('Timestamp')
         
         if len(df) == 0:
@@ -312,7 +308,6 @@ if uploaded_file is not None:
         actual_start_dt = df['Timestamp'].min()
         actual_end_dt = df['Timestamp'].max()
         
-        # Eğer rapor dönemi başlığı okunamadıysa, gerçek okunan veriyi referans al
         ref_start_str = expected_start.strftime('%d.%m.%Y %H:%M') if pd.notna(expected_start) else actual_start_dt.strftime('%d.%m.%Y %H:%M')
         ref_end_str = expected_end.strftime('%d.%m.%Y %H:%M') if pd.notna(expected_end) else actual_end_dt.strftime('%d.%m.%Y %H:%M')
 
@@ -341,25 +336,21 @@ if uploaded_file is not None:
         gap_threshold = timedelta(hours=gap_threshold_hours)
         all_gaps = []
         
-        # 1. Beklenen Dönem Başlangıcı ile İlk Veri Arasındaki Kesinti
         if pd.notna(expected_start):
             start_diff = actual_start_dt - expected_start
             if start_diff >= gap_threshold:
                 all_gaps.append({"Tip": "Başlangıç Veri Kaybı", "Baslangic": expected_start, "Bitis": actual_start_dt, "Sure": start_diff})
 
-        # 2. Verilerin Kendi İçerisindeki (veya eksik sıcaklık hücrelerindeki) Kesintiler
         df['TimeDiff'] = df['Timestamp'].diff()
         df['PrevTimestamp'] = df['Timestamp'].shift(1)
         for _, row in df[df['TimeDiff'] >= gap_threshold].iterrows():
             all_gaps.append({"Tip": "Sensör Veri Kesintisi (Ara Boşluk)", "Baslangic": row['PrevTimestamp'], "Bitis": row['Timestamp'], "Sure": row['TimeDiff']})
 
-        # 3. Son Veri ile Beklenen Dönem Bitişi Arasındaki Kesinti
         if pd.notna(expected_end):
             end_diff = expected_end - actual_end_dt
             if end_diff >= gap_threshold:
                 all_gaps.append({"Tip": "Bitiş Veri Kaybı", "Baslangic": actual_end_dt, "Bitis": expected_end, "Sure": end_diff})
 
-        # KESİNTİLERİ TABLOYA ÇEVİR VE FORMATLA
         df_gaps_report = pd.DataFrame()
         if all_gaps:
             df_gaps_report = pd.DataFrame(all_gaps).sort_values('Baslangic')
@@ -414,7 +405,12 @@ if uploaded_file is not None:
         
         decision_msg = ""
         status_term = ""
-        if total_max_duration.total_seconds() == 0 and total_min_duration.total_seconds() == 0:
+        
+        # Kesinti varsa diğer sıcaklık kararlarını ezer ve kullanıcının istediği mesajı verir
+        if len(all_gaps) > 0:
+            decision_msg = "VERİ KESİNTİSİ MEVCUT, İKİNCİL SICAKLIK ÖLÇÜMLERİNİ DEĞERLENDİR"
+            status_term = "Acil Müdahale"
+        elif total_max_duration.total_seconds() == 0 and total_min_duration.total_seconds() == 0:
             decision_msg = "TÜM VERİLER NORMAL"
             status_term = "Başarılı"
         elif total_max_duration.total_seconds() / 3600 >= 8 and (global_max_val and global_max_val >= 15):
@@ -488,7 +484,6 @@ if uploaded_file is not None:
                 pdf_data_v = create_pdf_bytes(pd.DataFrame(), metadata, "Sicaklik Ihlal Raporu", summary_stats, empty_msg="TEBRIKLER: Bu tarih araliginda hicbir sicaklik ihlali (limit asimi) tespit edilmemistir.")
                 st.download_button("📄 Boş İhlal Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal.pdf", "application/pdf")
 
-        # --- YENİ EKLENEN: KESİNTİLER SEKMESİ ---
         with tab3:
             st.subheader(f"Veri Kesintisi Raporu (>{gap_threshold_hours} Saat)")
             
