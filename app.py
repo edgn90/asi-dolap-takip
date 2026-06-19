@@ -133,11 +133,11 @@ def create_pdf_bytes(df, metadata, title, violation_summary=None, empty_msg="Ver
     pdf.add_table(df, empty_msg)
     return pdf.output(dest='S').encode('latin-1', 'ignore')
 
-# --- Veri Ayrıştırma ---
+# --- Kusursuz Veri Ayrıştırma Modülü ---
 def extract_metadata_from_text(text):
     meta = {}
     try:
-        lines = text.split('\n')
+        lines = text.splitlines()
         for line in lines[:50]:
             parts = [p.strip().replace('"', '') for p in line.replace(';', ',').split(',')]
             for i in range(len(parts)-1):
@@ -162,34 +162,37 @@ def analyze_data(file):
     df = None
     
     try:
-        # Excel Okuma
+        # Streamlit pointer sorunlarını atlamak için veriyi %100 RAM'e çekiyoruz:
+        file_bytes = file.getvalue() 
+        
+        # EXCEL OKUMA
         if filename.endswith(('.xlsx', '.xls')) and not filename.endswith('.csv'):
             try:
-                df_raw = pd.read_excel(file, header=None)
+                df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None)
                 header_idx = 0
                 for i in range(min(30, len(df_raw))):
                     row_vals = [normalize_str(x) for x in df_raw.iloc[i].tolist()]
                     if any("SICAKLIK" in v for v in row_vals) and any(("ZAMAN" in v or "TARIH" in v) for v in row_vals):
                         header_idx = i
                         break
-                file.seek(0)
-                df = pd.read_excel(file, header=header_idx)
+                df = pd.read_excel(io.BytesIO(file_bytes), header=header_idx)
             except Exception as e:
                 return None, {}, f"Excel Hatası: {str(e)}"
         
-        # CSV Okuma
+        # CSV OKUMA
         else:
-            file.seek(0)
-            raw_bytes = file.read(50000)
-            file.seek(0)
-            
-            try: text, enc = raw_bytes.decode('utf-8'), 'utf-8'
-            except: text, enc = raw_bytes.decode('ISO-8859-9'), 'ISO-8859-9'
+            # Görünmez BOM karakterlerini (Windows CSV) temizlemek için utf-8-sig
+            try: text = file_bytes.decode('utf-8-sig')
+            except: text = file_bytes.decode('ISO-8859-9')
                 
             metadata = extract_metadata_from_text(text)
             
+            # \n ve \r problemlerini güvenle aşmak için splitlines kullanıldı
+            lines = text.splitlines()
+            if not lines:
+                return None, {}, "Dosya tamamen boş."
+                
             header_idx = 0
-            lines = text.split('\n')
             for idx, line in enumerate(lines[:50]):
                 norm_line = normalize_str(line)
                 if ("SICAKLIK" in norm_line or "TEMP" in norm_line) and ("ZAMAN" in norm_line or "TARIH" in norm_line):
@@ -200,11 +203,12 @@ def analyze_data(file):
             sep = ';' if header_line.count(';') >= header_line.count(',') else ','
             
             try:
-                df = pd.read_csv(file, header=header_idx, sep=sep, encoding=enc, engine='python')
+                # StringIO sayesinde pointer(imleç) hataları imkansız hale gelir
+                df = pd.read_csv(io.StringIO(text), header=header_idx, sep=sep, engine='python', on_bad_lines='skip')
             except Exception as e:
                 return None, {}, f"CSV Ayraç Hatası: {str(e)}"
 
-        # Sütun Temizliği
+        # ORTAK TEMİZLİK VE AKILLI EŞLEŞTİRME
         if df is None or df.empty: return None, {}, "Tablo verisi bulunamadı."
         
         df = df.dropna(axis=1, how='all')
@@ -232,8 +236,13 @@ def analyze_data(file):
         if not time_col or not temp_col: 
             return None, {}, f"Sıcaklık veya Tarih sütunu bulunamadı. Tespit Edilen Sütunlar: {', '.join(df.columns)}"
 
-        # Tarih ve Sıcaklık Çevirisi
-        df['Timestamp'] = pd.to_datetime(df[time_col], dayfirst=True, errors='coerce')
+        # Hata Mesajı için ilk veriyi yedekleme
+        raw_len = len(df)
+        sample_time = df[time_col].iloc[0] if raw_len > 0 else "BOŞ"
+        sample_temp = df[temp_col].iloc[0] if raw_len > 0 else "BOŞ"
+
+        # DÖNÜŞÜMLER
+        df['Timestamp'] = pd.to_datetime(df[time_col].astype(str), dayfirst=True, errors='coerce')
         
         if df[temp_col].dtype == object:
             df['Temp'] = df[temp_col].astype(str).str.replace(r'[^\d.,-]', '', regex=True).str.replace(',', '.')
@@ -244,7 +253,7 @@ def analyze_data(file):
         df = df.dropna(subset=['Timestamp', 'Temp']).sort_values('Timestamp')
         
         if len(df) == 0:
-            return None, {}, "Tüm sıcaklık ve tarih verileri boş veya dönüştürülemez formatta."
+            return None, {}, f"Bulunan Sütunlar: [{time_col}] ve [{temp_col}]. Ancak içlerindeki veriler sayı ve tarihe çevrilemedi! Örnek İlk Veriniz: Tarih='{sample_time}', Sıcaklık='{sample_temp}'"
 
         metadata['matched_time'] = time_col
         metadata['matched_temp'] = temp_col
@@ -252,14 +261,14 @@ def analyze_data(file):
         return df, metadata, ""
 
     except Exception as e:
-        return None, {}, f"Bilinmeyen Hata: {str(e)}"
+        import traceback
+        return None, {}, f"Bilinmeyen Hata: {str(e)} \nDetay: {traceback.format_exc()}"
 
 # --- ANA AKIŞ ---
 if uploaded_file is not None:
     df, metadata, error_message = analyze_data(uploaded_file)
     
     if df is not None and not df.empty:
-        # En üstte okunan veri sayısını gösteriyoruz!
         st.success(f"✅ Sistem dosyayı başarıyla okudu! Toplam **{len(df)} adet** sıcaklık kaydı işleme alındı.")
         st.info(f"**Birim:** {metadata.get('Birim','-')} | **Depo:** {metadata.get('Depo','-')}")
         
@@ -313,7 +322,6 @@ if uploaded_file is not None:
         
         df_violations = pd.DataFrame(violation_events)
         
-        # Karar Mekanizması
         decision_msg = "MANUEL KONTROL GEREKLI"
         if total_max_duration.total_seconds() == 0 and total_min_duration.total_seconds() == 0:
             decision_msg = "TÜM VERİLER NORMAL - KULLANILABİLİR ONAYI"
@@ -338,9 +346,7 @@ if uploaded_file is not None:
             st.subheader("Dolap Sıcaklık Seyri")
             st.markdown("Aşağıdaki grafikte okunan tüm sıcaklık değerlerini saniye saniye görebilirsiniz.")
             
-            # Dinamik Çizgi Grafiği (Tüm Verileri Gösterir)
             fig_line = px.line(df_clean, x='Timestamp', y='Temp', title='Sıcaklık Grafiği')
-            # 2 ve 8 derece sınır çizgilerini ekle
             fig_line.add_hline(y=max_temp_limit, line_dash="dash", line_color="red", annotation_text=f"Max Limit ({max_temp_limit}°C)")
             fig_line.add_hline(y=min_temp_limit, line_dash="dash", line_color="blue", annotation_text=f"Min Limit ({min_temp_limit}°C)")
             fig_line.update_layout(yaxis_title="Sıcaklık (°C)", xaxis_title="Tarih / Saat")
@@ -357,7 +363,6 @@ if uploaded_file is not None:
             with col_b:
                 st.markdown("#### 🖨️ Tam Rapor (Tüm Veriler)")
                 st.info("Bu buton ile ihlal olsun veya olmasın okunan bütün sıcaklık verilerinin tam dökümünü Sağlık Bakanlığı formatında PDF olarak indirebilirsiniz.")
-                # PDF Raporunu oluştur (Tüm veriler için)
                 pdf_full_data = create_pdf_bytes(df_display, metadata, "Tum Sicaklik Raporu (Tam Liste)")
                 st.download_button("📄 Tüm Verilerin PDF Raporunu İndir", pdf_full_data, "tum_sicaklik_verileri.pdf", "application/pdf")
 
