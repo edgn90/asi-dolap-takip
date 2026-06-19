@@ -279,7 +279,7 @@ if uploaded_file is not None:
     
     if df is not None and not df.empty:
         
-        # --- DOSYA VE DOLAP BİLGİLERİ (YENİ EKLENEN KISIM) ---
+        # --- DOSYA VE DOLAP BİLGİLERİ ---
         actual_start = df['Timestamp'].min().strftime('%d.%m.%Y %H:%M')
         actual_end = df['Timestamp'].max().strftime('%d.%m.%Y %H:%M')
         
@@ -309,8 +309,23 @@ if uploaded_file is not None:
         df['TimeDiff'] = df['Timestamp'].diff()
         df['PrevTimestamp'] = df['Timestamp'].shift(1)
         
+        # KESİNTİLERİ TESPİT ET
         for _, row in df[df['TimeDiff'] >= gap_threshold].iterrows():
-            all_gaps.append({"Tip": "Veri Arası Bosluk", "Baslangic": row['PrevTimestamp'], "Bitis": row['Timestamp'], "Sure": row['TimeDiff']})
+            all_gaps.append({"Tip": "Sensör Veri Kesintisi", "Baslangic": row['PrevTimestamp'], "Bitis": row['Timestamp'], "Sure": row['TimeDiff']})
+
+        # KESİNTİLERİ TABLOYA ÇEVİR VE FORMATLA
+        df_gaps_report = pd.DataFrame()
+        if all_gaps:
+            df_gaps_report = pd.DataFrame(all_gaps).sort_values('Baslangic')
+            df_gaps_report['Baslangic'] = df_gaps_report['Baslangic'].dt.strftime('%d.%m.%Y %H:%M:%S')
+            df_gaps_report['Bitis'] = df_gaps_report['Bitis'].dt.strftime('%d.%m.%Y %H:%M:%S')
+            df_gaps_report['Sure'] = df_gaps_report['Sure'].astype(str).apply(lambda x: x.split('.')[0])
+            df_gaps_report.rename(columns={
+                "Tip": "Kesinti Türü", 
+                "Baslangic": "Başlangıç Tarih/Saat", 
+                "Bitis": "Bitiş Tarih/Saat", 
+                "Sure": "Toplam Kesinti Süresi"
+            }, inplace=True)
 
         df_clean = df.copy()
         if has_intervention and intervention_dt:
@@ -373,7 +388,8 @@ if uploaded_file is not None:
         }
 
         # --- ARAYÜZ GRAFİK VE TABLOLAR ---
-        tab1, tab2 = st.tabs(["📈 Genel Sıcaklık Grafiği (Tüm Veriler)", "🚨 İhlal Raporları ve Çıktılar"])
+        # Veri kesintileri için yepyeni bir sekme (Tab 3) eklendi
+        tab1, tab2, tab3 = st.tabs(["📈 Genel Sıcaklık Grafiği", "🚨 İhlal Raporları", "⚠️ Veri Kesintileri"])
 
         with tab1:
             st.subheader("Dolap Sıcaklık Seyri")
@@ -425,6 +441,20 @@ if uploaded_file is not None:
                 st.success("Tebrikler! Bu tarih aralığında veriler normal sınırlar içerisindedir, sıcaklık ihlali tespit edilmemiştir.")
                 pdf_data_v = create_pdf_bytes(pd.DataFrame(), metadata, "Sicaklik Ihlal Raporu", summary_stats, empty_msg="TEBRIKLER: Bu tarih araliginda hicbir sicaklik ihlali (limit asimi) tespit edilmemistir.")
                 st.download_button("📄 Boş İhlal Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal.pdf", "application/pdf")
+
+        # --- YENİ: KESİNTİLER SEKMESİ ---
+        with tab3:
+            st.subheader(f"Veri Kesintisi Raporu (>{gap_threshold_hours} Saat)")
+            
+            if not df_gaps_report.empty:
+                st.error(f"🚨 DİKKAT: Cihazda **{len(df_gaps_report)} adet** (belirlenen {gap_threshold_hours} saat limitini aşan) veri kesintisi tespit edilmiştir!")
+                st.markdown("Cihaz pilinin bitmesi, bağlantı kopukluğu veya cihazın kapatılması sebebiyle aşağıdaki zaman aralıklarında veri kaydedilmemiştir (Kör Nokta).")
+                st.dataframe(df_gaps_report, use_container_width=True)
+                
+                pdf_data_gaps = create_pdf_bytes(df_gaps_report, metadata, "Veri Kesintisi Raporu")
+                st.download_button("📄 Kesinti Raporunu PDF İndir", pdf_data_gaps, "veri_kesintisi_raporu.pdf", "application/pdf")
+            else:
+                st.success(f"✅ Sistem belirlenen kriterlerde ({gap_threshold_hours} saati aşan) hiçbir veri kesintisi bulamadı. Sensör aralıksız veri kaydetmiştir.")
 
     else:
         st.error(f"Dosya okunamadı! Hata Sebebi: **{error_message}**")
