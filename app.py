@@ -59,9 +59,8 @@ def calculate_mkt(temps_celsius):
     if avg_exp == 0: return None
     return (dh_r / (-np.log(avg_exp))) - 273.15
 
-# --- Özel Veri Dönüştürücüler (YENİ EKLENEN KISIM) ---
+# --- Özel Veri Dönüştürücüler ---
 def parse_date_robust(date_str):
-    """Metin ne kadar bozuk olursa olsun içinden tarihi cımbızla çeker"""
     if pd.isna(date_str): return pd.NaT
     s = str(date_str).strip()
     m = re.search(r'(\d{1,2})[./-](\d{1,2})[./-](\d{4})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?', s)
@@ -78,7 +77,6 @@ def parse_date_robust(date_str):
         return pd.NaT
 
 def parse_temp_robust(temp_str):
-    """Sıcaklık derecesini temizler ve garantili bir şekilde ondalık sayıya çevirir"""
     if pd.isna(temp_str): return np.nan
     s = str(temp_str).strip()
     m = re.search(r'(-?\d+[,.]\d+|-?\d+)', s)
@@ -136,7 +134,7 @@ class ReportPDF(FPDF):
             self.cell(0, 6, tr_fix(f"Ortalama Kinetik Sicaklik (MKT): {summary_data['mkt_val']}"), ln=True)
         self.ln(5)
         self.set_font('Arial', 'B', 11)
-        self.multi_cell(0, 8, tr_fix(f"KARAR: {summary_data.get('decision', '-')}"), border=1, align='C')
+        self.multi_cell(0, 8, tr_fix(f"KARAR: {summary_data.get('status')} - {summary_data.get('decision', '-')}"), border=1, align='C')
         self.ln(5)
 
     def add_table(self, df, empty_msg="Veri bulunamadi."):
@@ -196,7 +194,6 @@ def analyze_data(file):
     try:
         file_bytes = file.getvalue() 
         
-        # EXCEL OKUMA
         if filename.endswith(('.xlsx', '.xls')) and not filename.endswith('.csv'):
             try:
                 df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None)
@@ -210,7 +207,6 @@ def analyze_data(file):
             except Exception as e:
                 return None, {}, f"Excel Hatası: {str(e)}"
         
-        # CSV OKUMA
         else:
             try: text = file_bytes.decode('utf-8-sig')
             except: text = file_bytes.decode('ISO-8859-9')
@@ -263,35 +259,46 @@ def analyze_data(file):
         if not time_col or not temp_col: 
             return None, {}, f"Sıcaklık veya Tarih sütunu bulunamadı. Tespit Edilen Sütunlar: {', '.join(df.columns)}"
 
-        raw_len = len(df)
-        sample_time = df[time_col].iloc[0] if raw_len > 0 else "BOŞ"
-        sample_temp = df[temp_col].iloc[0] if raw_len > 0 else "BOŞ"
-
-        # --- DÖNÜŞÜMLER: PANDAS BYPASS VE ÖZEL PARSER KULLANIMI ---
         df['Timestamp'] = df[time_col].apply(parse_date_robust)
         df['Temp'] = df[temp_col].apply(parse_temp_robust)
             
         df = df.dropna(subset=['Timestamp', 'Temp']).sort_values('Timestamp')
         
         if len(df) == 0:
-            return None, {}, f"Sütunlar bulundu [{time_col}, {temp_col}] ancak dönüşüm hatalı! Örnek İlk Veriniz: Tarih='{sample_time}', Sıcaklık='{sample_temp}'"
-
-        metadata['matched_time'] = time_col
-        metadata['matched_temp'] = temp_col
+            return None, {}, "Sütunlar bulundu ancak veriler sayıya veya tarihe çevrilemedi."
 
         return df, metadata, ""
 
     except Exception as e:
         import traceback
-        return None, {}, f"Bilinmeyen Hata: {str(e)} \nDetay: {traceback.format_exc()}"
+        return None, {}, f"Bilinmeyen Hata: {str(e)}"
 
 # --- ANA AKIŞ ---
 if uploaded_file is not None:
     df, metadata, error_message = analyze_data(uploaded_file)
     
     if df is not None and not df.empty:
-        st.success(f"✅ Sistem dosyayı başarıyla okudu! Toplam **{len(df)} adet** sıcaklık kaydı işleme alındı.")
-        st.info(f"**Birim:** {metadata.get('Birim','-')} | **Depo:** {metadata.get('Depo','-')}")
+        
+        # --- DOSYA VE DOLAP BİLGİLERİ (YENİ EKLENEN KISIM) ---
+        actual_start = df['Timestamp'].min().strftime('%d.%m.%Y %H:%M')
+        actual_end = df['Timestamp'].max().strftime('%d.%m.%Y %H:%M')
+        
+        st.markdown(f"""
+        <div style="background-color: #f0f2f6; padding: 20px; border-radius: 10px; margin-bottom: 20px; border-left: 5px solid #0052cc;">
+            <h4 style="margin-top: 0; color: #0052cc;">📋 Özet Bilgi Kartı</h4>
+            <div style="display: flex; justify-content: space-between;">
+                <div>
+                    <b>🏢 Birim Adı:</b> {metadata.get('Birim', 'Otomatik algılanamadı')}<br>
+                    <b>📦 Stok / Dolap Kodu:</b> {metadata.get('Stok', metadata.get('Depo', 'Otomatik algılanamadı'))}
+                </div>
+                <div>
+                    <b>🕒 Başlangıç:</b> {actual_start}<br>
+                    <b>🕒 Bitiş:</b> {actual_end}<br>
+                    <b>📊 Toplam Kayıt:</b> {len(df)} adet
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
         
         if has_intervention and intervention_dt:
             st.warning(f"⚠️ DİKKAT: {intervention_dt.strftime('%d.%m.%Y %H:%M')} sonrası veriler yoksayıldı.")
@@ -343,13 +350,17 @@ if uploaded_file is not None:
         
         df_violations = pd.DataFrame(violation_events)
         
-        decision_msg = "MANUEL KONTROL GEREKLI"
+        decision_msg = ""
+        status_term = ""
         if total_max_duration.total_seconds() == 0 and total_min_duration.total_seconds() == 0:
-            decision_msg = "TÜM VERİLER NORMAL - KULLANILABİLİR ONAYI"
+            decision_msg = "TÜM VERİLER NORMAL"
+            status_term = "Başarılı"
         elif total_max_duration.total_seconds() / 3600 >= 8 and (global_max_val and global_max_val >= 15):
             decision_msg = "IMHA ONERILIR (SURE > 8s VE ISI > 15C)"
+            status_term = "Acil Müdahale"
         else:
-            decision_msg = "KARANTINA - RISKLI VERILER VAR"
+            decision_msg = "RISKLI VERILER VAR - MANUEL KONTROL"
+            status_term = "Geliştirilmeli"
 
         summary_stats = {
             "max_dur": format_duration(total_max_duration) if total_max_duration > timedelta(0) else "-",
@@ -357,10 +368,11 @@ if uploaded_file is not None:
             "min_dur": format_duration(total_min_duration) if total_min_duration > timedelta(0) else "-",
             "min_val": f"{global_min_val} C" if global_min_val is not None else "-",
             "mkt_val": f"{mkt_value:.2f} C" if mkt_value is not None else "-",
+            "status": status_term,
             "decision": decision_msg,
         }
 
-        # --- ARAYÜZ ---
+        # --- ARAYÜZ GRAFİK VE TABLOLAR ---
         tab1, tab2 = st.tabs(["📈 Genel Sıcaklık Grafiği (Tüm Veriler)", "🚨 İhlal Raporları ve Çıktılar"])
 
         with tab1:
@@ -383,19 +395,19 @@ if uploaded_file is not None:
             
             with col_b:
                 st.markdown("#### 🖨️ Tam Rapor (Tüm Veriler)")
-                st.info("Bu buton ile ihlal olsun veya olmasın okunan bütün sıcaklık verilerinin tam dökümünü Sağlık Bakanlığı formatında PDF olarak indirebilirsiniz.")
+                st.info("Bu buton ile ihlal olsun veya olmasın okunan bütün sıcaklık verilerinin tam dökümünü formatlı PDF olarak indirebilirsiniz.")
                 pdf_full_data = create_pdf_bytes(df_display, metadata, "Tum Sicaklik Raporu (Tam Liste)")
                 st.download_button("📄 Tüm Verilerin PDF Raporunu İndir", pdf_full_data, "tum_sicaklik_verileri.pdf", "application/pdf")
 
         with tab2:
             st.subheader("Otomatik Karar & İhlal Tespiti")
             
-            if "KULLANILABİLİR" in decision_msg:
-                st.success(f"✅ **KARAR:** {decision_msg}")
-            elif "IMHA" in decision_msg:
-                st.error(f"🚨 **KARAR:** {decision_msg}")
+            if status_term == "Başarılı":
+                st.success(f"✅ **KARAR DURUMU:** {status_term} | {decision_msg}")
+            elif status_term == "Acil Müdahale":
+                st.error(f"🚨 **KARAR DURUMU:** {status_term} | {decision_msg}")
             else:
-                st.warning(f"⚠️ **KARAR:** {decision_msg}")
+                st.warning(f"⚠️ **KARAR DURUMU:** {status_term} | {decision_msg}")
 
             col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric("Toplam Üst Limit Aşım", summary_stats["max_dur"])
