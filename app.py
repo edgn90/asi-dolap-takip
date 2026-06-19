@@ -5,6 +5,7 @@ import numpy as np
 from datetime import timedelta
 from fpdf import FPDF
 import io
+import re
 
 # --- Sayfa Ayarları ---
 st.set_page_config(page_title="Aşı Dolabı Analiz Raporu", layout="wide")
@@ -57,6 +58,37 @@ def calculate_mkt(temps_celsius):
     avg_exp = exp_terms.mean()
     if avg_exp == 0: return None
     return (dh_r / (-np.log(avg_exp))) - 273.15
+
+# --- Özel Veri Dönüştürücüler (YENİ EKLENEN KISIM) ---
+def parse_date_robust(date_str):
+    """Metin ne kadar bozuk olursa olsun içinden tarihi cımbızla çeker"""
+    if pd.isna(date_str): return pd.NaT
+    s = str(date_str).strip()
+    m = re.search(r'(\d{1,2})[./-](\d{1,2})[./-](\d{4})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?', s)
+    if m:
+        d, mon, y, h, min, sec = m.groups()
+        sec = int(sec) if sec else 0
+        try:
+            return pd.Timestamp(year=int(y), month=int(mon), day=int(d), hour=int(h), minute=int(min), second=sec)
+        except:
+            return pd.NaT
+    try:
+        return pd.to_datetime(s, dayfirst=True)
+    except:
+        return pd.NaT
+
+def parse_temp_robust(temp_str):
+    """Sıcaklık derecesini temizler ve garantili bir şekilde ondalık sayıya çevirir"""
+    if pd.isna(temp_str): return np.nan
+    s = str(temp_str).strip()
+    m = re.search(r'(-?\d+[,.]\d+|-?\d+)', s)
+    if m:
+        val = m.group(1).replace(',', '.')
+        try:
+            return float(val)
+        except:
+            return np.nan
+    return np.nan
 
 # --- PDF Sınıfı ve Oluşturucu ---
 class ReportPDF(FPDF):
@@ -133,7 +165,7 @@ def create_pdf_bytes(df, metadata, title, violation_summary=None, empty_msg="Ver
     pdf.add_table(df, empty_msg)
     return pdf.output(dest='S').encode('latin-1', 'ignore')
 
-# --- Kusursuz Veri Ayrıştırma Modülü ---
+# --- Veri Ayrıştırma Modülü ---
 def extract_metadata_from_text(text):
     meta = {}
     try:
@@ -162,7 +194,6 @@ def analyze_data(file):
     df = None
     
     try:
-        # Streamlit pointer sorunlarını atlamak için veriyi %100 RAM'e çekiyoruz:
         file_bytes = file.getvalue() 
         
         # EXCEL OKUMA
@@ -181,13 +212,11 @@ def analyze_data(file):
         
         # CSV OKUMA
         else:
-            # Görünmez BOM karakterlerini (Windows CSV) temizlemek için utf-8-sig
             try: text = file_bytes.decode('utf-8-sig')
             except: text = file_bytes.decode('ISO-8859-9')
                 
             metadata = extract_metadata_from_text(text)
             
-            # \n ve \r problemlerini güvenle aşmak için splitlines kullanıldı
             lines = text.splitlines()
             if not lines:
                 return None, {}, "Dosya tamamen boş."
@@ -203,12 +232,10 @@ def analyze_data(file):
             sep = ';' if header_line.count(';') >= header_line.count(',') else ','
             
             try:
-                # StringIO sayesinde pointer(imleç) hataları imkansız hale gelir
                 df = pd.read_csv(io.StringIO(text), header=header_idx, sep=sep, engine='python', on_bad_lines='skip')
             except Exception as e:
                 return None, {}, f"CSV Ayraç Hatası: {str(e)}"
 
-        # ORTAK TEMİZLİK VE AKILLI EŞLEŞTİRME
         if df is None or df.empty: return None, {}, "Tablo verisi bulunamadı."
         
         df = df.dropna(axis=1, how='all')
@@ -236,24 +263,18 @@ def analyze_data(file):
         if not time_col or not temp_col: 
             return None, {}, f"Sıcaklık veya Tarih sütunu bulunamadı. Tespit Edilen Sütunlar: {', '.join(df.columns)}"
 
-        # Hata Mesajı için ilk veriyi yedekleme
         raw_len = len(df)
         sample_time = df[time_col].iloc[0] if raw_len > 0 else "BOŞ"
         sample_temp = df[temp_col].iloc[0] if raw_len > 0 else "BOŞ"
 
-        # DÖNÜŞÜMLER
-        df['Timestamp'] = pd.to_datetime(df[time_col].astype(str), dayfirst=True, errors='coerce')
-        
-        if df[temp_col].dtype == object:
-            df['Temp'] = df[temp_col].astype(str).str.replace(r'[^\d.,-]', '', regex=True).str.replace(',', '.')
-            df['Temp'] = pd.to_numeric(df['Temp'], errors='coerce')
-        else:
-            df['Temp'] = pd.to_numeric(df[temp_col], errors='coerce')
+        # --- DÖNÜŞÜMLER: PANDAS BYPASS VE ÖZEL PARSER KULLANIMI ---
+        df['Timestamp'] = df[time_col].apply(parse_date_robust)
+        df['Temp'] = df[temp_col].apply(parse_temp_robust)
             
         df = df.dropna(subset=['Timestamp', 'Temp']).sort_values('Timestamp')
         
         if len(df) == 0:
-            return None, {}, f"Bulunan Sütunlar: [{time_col}] ve [{temp_col}]. Ancak içlerindeki veriler sayı ve tarihe çevrilemedi! Örnek İlk Veriniz: Tarih='{sample_time}', Sıcaklık='{sample_temp}'"
+            return None, {}, f"Sütunlar bulundu [{time_col}, {temp_col}] ancak dönüşüm hatalı! Örnek İlk Veriniz: Tarih='{sample_time}', Sıcaklık='{sample_temp}'"
 
         metadata['matched_time'] = time_col
         metadata['matched_temp'] = temp_col
@@ -339,7 +360,7 @@ if uploaded_file is not None:
             "decision": decision_msg,
         }
 
-        # --- ARAYÜZ (YENİLENMİŞ TASARIM) ---
+        # --- ARAYÜZ ---
         tab1, tab2 = st.tabs(["📈 Genel Sıcaklık Grafiği (Tüm Veriler)", "🚨 İhlal Raporları ve Çıktılar"])
 
         with tab1:
