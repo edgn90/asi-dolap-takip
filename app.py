@@ -32,57 +32,31 @@ if has_intervention:
     int_time = st.sidebar.time_input("Müdahale Saati")
     if int_date and int_time:
         intervention_dt = pd.to_datetime(f"{int_date} {int_time}")
-        st.sidebar.info(f"Analiz **{intervention_dt.strftime('%d.%m.%Y %H:%M')}** tarihine kadar olan verilerle sınırlandırılacaktır.")
+        st.sidebar.info(f"Analiz **{intervention_dt.strftime('%d.%m.%Y %H:%M')}** tarihine kadar sınırlandırılmıştır.")
 
 # --- Yardımcı Fonksiyonlar ---
 def tr_fix(text):
-    if not isinstance(text, str):
-        return str(text)
-    mapping = {
-        'Ğ': 'G', 'ğ': 'g', 'Ü': 'U', 'ü': 'u', 'Ş': 'S', 'ş': 's',
-        'İ': 'I', 'ı': 'i', 'Ö': 'O', 'ö': 'o', 'Ç': 'C', 'ç': 'c'
-    }
-    for k, v in mapping.items():
-        text = text.replace(k, v)
+    if not isinstance(text, str): return str(text)
+    mapping = {'Ğ': 'G', 'ğ': 'g', 'Ü': 'U', 'ü': 'u', 'Ş': 'S', 'ş': 's', 'İ': 'I', 'ı': 'i', 'Ö': 'O', 'ö': 'o', 'Ç': 'C', 'ç': 'c'}
+    for k, v in mapping.items(): text = text.replace(k, v)
     return text
 
 def normalize_str(s):
-    """Türkçe karakterleri güvenli bir şekilde standartlaştırır"""
     if not isinstance(s, str): return ""
     return s.replace('ı','i').replace('İ','I').replace('ğ','g').replace('Ğ','G').replace('ş','s').replace('Ş','S').replace('ö','o').replace('Ö','O').replace('ç','c').replace('Ç','C').upper()
-
-def parse_metadata_date(date_str):
-    try:
-        if not date_str or pd.isna(date_str):
-            return None
-        date_str = str(date_str).strip().replace('"', '').replace("'", "")
-        dt = pd.to_datetime(date_str, dayfirst=True)
-        if pd.isna(dt):
-            return None
-        return dt
-    except:
-        return None
 
 def format_duration(td):
     return str(td).split('.')[0]
 
 def calculate_mkt(temps_celsius):
     temps = pd.to_numeric(temps_celsius, errors='coerce').dropna()
-    if temps.empty:
-        return None
-    
+    if temps.empty: return None
     temps_kelvin = temps.values + 273.15
     dh_r = 10000 
-    
     exp_terms = np.exp(-dh_r / temps_kelvin)
     avg_exp = exp_terms.mean()
-    
-    if avg_exp == 0:
-        return None
-        
-    mkt_kelvin = dh_r / (-np.log(avg_exp))
-    mkt_celsius = mkt_kelvin - 273.15
-    return mkt_celsius
+    if avg_exp == 0: return None
+    return (dh_r / (-np.log(avg_exp))) - 273.15
 
 # --- PDF Sınıfı ve Oluşturucu ---
 class ReportPDF(FPDF):
@@ -95,7 +69,6 @@ class ReportPDF(FPDF):
     def header(self):
         self.set_font('Arial', 'B', 14)
         self.cell(0, 10, tr_fix(self.report_title), ln=True, align='C')
-        
         self.set_font('Arial', '', 9)
         self.cell(40, 6, tr_fix("Birim:"), border=0)
         self.cell(0, 6, tr_fix(self.metadata.get('Birim', '-')), ln=True)
@@ -103,19 +76,6 @@ class ReportPDF(FPDF):
         self.cell(0, 6, tr_fix(self.metadata.get('Depo', '-')), ln=True)
         self.cell(40, 6, tr_fix("Stok Birimi:"), border=0)
         self.cell(0, 6, tr_fix(self.metadata.get('Stok', '-')), ln=True)
-        self.cell(40, 6, tr_fix("Rapor Tarih Aralığı:"), border=0)
-        
-        start_str = str(self.metadata.get('Baslangic', '-'))
-        end_str = str(self.metadata.get('Bitis', '-'))
-        self.cell(0, 6, f"{start_str} -- {end_str}", ln=True)
-        
-        if self.metadata.get('Mudahale'):
-            self.set_text_color(200, 0, 0)
-            self.cell(0, 6, tr_fix(f"DIKKAT: {self.metadata['Mudahale']} tarihli MUDAHALE mevcuttur. Analiz bu tarihe kadar yapilmistir."), ln=True)
-            self.set_text_color(0, 0, 0)
-
-        self.ln(5)
-        self.line(10, self.get_y(), 200, self.get_y())
         self.ln(5)
 
     def footer(self):
@@ -126,72 +86,54 @@ class ReportPDF(FPDF):
     def add_violation_summary(self, summary_data):
         self.set_font('Arial', 'B', 11)
         self.cell(0, 8, tr_fix("IHLAL VE TERMAL STRES OZETI"), ln=True)
-        
-        if summary_data.get('intervention'):
-             self.set_font('Arial', 'B', 9)
-             self.set_text_color(200, 0, 0)
-             self.cell(0, 6, tr_fix(f"MUDAHALE TARIHI: {summary_data['intervention']}"), ln=True)
-             self.set_font('Arial', 'I', 8)
-             self.cell(0, 6, tr_fix("(Bu tarihten sonraki ihlaller toplama dahil edilmemistir)"), ln=True)
-             self.set_text_color(0, 0, 0)
-             self.ln(2)
-        
         self.set_font('Arial', '', 10)
         col_w = 45
         self.cell(col_w, 7, tr_fix("Kriter"), 1)
         self.cell(col_w, 7, tr_fix("Toplam Sure"), 1)
         self.cell(col_w, 7, tr_fix("En Uc Deger"), 1)
         self.ln()
-        
         self.cell(col_w, 7, tr_fix("Ust Limit Asimi"), 1)
         self.cell(col_w, 7, tr_fix(summary_data['max_dur']), 1)
         self.cell(col_w, 7, tr_fix(summary_data['max_val']), 1)
         self.ln()
-        
         self.cell(col_w, 7, tr_fix("Alt Limit Asimi"), 1)
         self.cell(col_w, 7, tr_fix(summary_data['min_dur']), 1)
         self.cell(col_w, 7, tr_fix(summary_data['min_val']), 1)
         self.ln(5)
-        
         if summary_data.get('mkt_val'):
-            self.set_font('Arial', 'I', 9)
             self.cell(0, 6, tr_fix(f"Ortalama Kinetik Sicaklik (MKT): {summary_data['mkt_val']}"), ln=True)
-            self.ln(3)
-
-        decision = summary_data.get('decision', '-')
+        self.ln(5)
         self.set_font('Arial', 'B', 11)
-        self.multi_cell(0, 8, tr_fix(f"KARAR: {decision}"), border=1, align='C')
+        self.multi_cell(0, 8, tr_fix(f"KARAR: {summary_data.get('decision', '-')}"), border=1, align='C')
         self.ln(5)
 
-    def add_table(self, df):
+    def add_table(self, df, empty_msg="Veri bulunamadi."):
         if df.empty:
-            self.cell(0, 10, tr_fix("Veri bulunamadi."), ln=True, align='C')
+            self.set_font('Arial', 'I', 10)
+            self.cell(0, 10, tr_fix(empty_msg), ln=True, align='C')
             return
-
+            
         col_width = 190 / len(df.columns)
         self.set_font('Arial', 'B', 9)
         self.set_fill_color(200, 220, 255) 
         for col in df.columns:
             self.cell(col_width, 8, tr_fix(col), border=1, fill=True, align='C')
         self.ln()
-        
         self.set_font('Arial', '', 8)
         self.set_fill_color(255, 255, 255)
         for index, row in df.iterrows():
             for item in row:
-                text = tr_fix(str(item))
-                self.cell(col_width, 7, text, border=1, align='C')
+                self.cell(col_width, 7, tr_fix(str(item)), border=1, align='C')
             self.ln()
 
-def create_pdf_bytes(df, metadata, title, violation_summary=None):
+def create_pdf_bytes(df, metadata, title, violation_summary=None, empty_msg="Veri bulunamadi."):
     pdf = ReportPDF(metadata, title)
     pdf.add_page()
-    if violation_summary:
-        pdf.add_violation_summary(violation_summary)
-    pdf.add_table(df)
+    if violation_summary: pdf.add_violation_summary(violation_summary)
+    pdf.add_table(df, empty_msg)
     return pdf.output(dest='S').encode('latin-1', 'ignore')
 
-# --- Gelişmiş Veri Ayrıştırma Modülü ---
+# --- Veri Ayrıştırma ---
 def extract_metadata_from_text(text):
     meta = {}
     try:
@@ -201,19 +143,15 @@ def extract_metadata_from_text(text):
             for i in range(len(parts)-1):
                 key = normalize_str(parts[i])
                 val = parts[i+1]
-                
                 if not val:
                     for j in range(i+1, len(parts)):
                         if parts[j]:
                             val = parts[j]
                             break
                 if not val: continue
-                
                 if "BIRIM" == key: meta['Birim'] = val
                 elif "DEPO" == key: meta['Depo'] = val
                 elif "STOK BIRIMI" in key: meta['Stok'] = val
-                elif "BASLANGIC" in key: meta['Baslangic'] = val
-                elif "BITIS" in key: meta['Bitis'] = val
     except:
         pass
     return meta
@@ -224,35 +162,29 @@ def analyze_data(file):
     df = None
     
     try:
-        # EXCEL FORMATI İÇİN
+        # Excel Okuma
         if filename.endswith(('.xlsx', '.xls')) and not filename.endswith('.csv'):
             try:
                 df_raw = pd.read_excel(file, header=None)
                 header_idx = 0
                 for i in range(min(30, len(df_raw))):
-                    row_values_upper = [normalize_str(x) for x in df_raw.iloc[i].tolist()]
-                    if any("SICAKLIK" in val for val in row_values_upper) and any(("ZAMAN" in val or "TARIH" in val) for val in row_values_upper):
+                    row_vals = [normalize_str(x) for x in df_raw.iloc[i].tolist()]
+                    if any("SICAKLIK" in v for v in row_vals) and any(("ZAMAN" in v or "TARIH" in v) for v in row_vals):
                         header_idx = i
                         break
-                        
                 file.seek(0)
                 df = pd.read_excel(file, header=header_idx)
             except Exception as e:
-                return None, {}, f"Excel okuma hatası: {str(e)}"
-
-        # CSV FORMATI İÇİN (Güçlendirilmiş Encoding ve Ayraç Algılama)
+                return None, {}, f"Excel Hatası: {str(e)}"
+        
+        # CSV Okuma
         else:
             file.seek(0)
-            raw_bytes = file.read(20000)
+            raw_bytes = file.read(50000)
             file.seek(0)
             
-            # Encoding Tespiti
-            try:
-                text = raw_bytes.decode('utf-8')
-                enc = 'utf-8'
-            except UnicodeDecodeError:
-                text = raw_bytes.decode('ISO-8859-9')
-                enc = 'ISO-8859-9'
+            try: text, enc = raw_bytes.decode('utf-8'), 'utf-8'
+            except: text, enc = raw_bytes.decode('ISO-8859-9'), 'ISO-8859-9'
                 
             metadata = extract_metadata_from_text(text)
             
@@ -260,42 +192,37 @@ def analyze_data(file):
             lines = text.split('\n')
             for idx, line in enumerate(lines[:50]):
                 norm_line = normalize_str(line)
-                if "SICAKLIK" in norm_line and ("ZAMAN" in norm_line or "TARIH" in norm_line):
+                if ("SICAKLIK" in norm_line or "TEMP" in norm_line) and ("ZAMAN" in norm_line or "TARIH" in norm_line):
                     header_idx = idx
                     break
             
-            # Ayraç (Delimiter) Tespiti
             header_line = lines[header_idx]
-            sep = ';' if header_line.count(';') > header_line.count(',') else ','
+            sep = ';' if header_line.count(';') >= header_line.count(',') else ','
             
             try:
-                df = pd.read_csv(file, header=header_idx, sep=sep, encoding=enc)
+                df = pd.read_csv(file, header=header_idx, sep=sep, encoding=enc, engine='python')
             except Exception as e:
-                return None, {}, f"CSV Yapısal Hata: {str(e)}"
+                return None, {}, f"CSV Ayraç Hatası: {str(e)}"
 
-        # ORTAK KONTROLLER VE SÜTUN TESPİTİ
-        if df is None or df.empty:
-            return None, {}, "Dosya içinde okunabilir tablo verisi bulunamadı."
-
+        # Sütun Temizliği
+        if df is None or df.empty: return None, {}, "Tablo verisi bulunamadı."
+        
         df = df.dropna(axis=1, how='all')
-        df.columns = df.columns.astype(str).str.strip()
+        df.columns = [str(c).strip().replace('"', '').replace('\r', '') for c in df.columns]
         
         time_col = None
         temp_col = None
 
-        # Akıllı Sütun Bulucu
         for col in df.columns:
             norm_col = normalize_str(col)
-            # Tarih Kolonunu bul (Kayıt Tarihini es geç, Ölçüm Tarihini önceliklendir)
-            if "ZAMAN" in norm_col or "TARIH" in norm_col:
-                if "KAYIT" not in norm_col: 
+            if any(k in norm_col for k in ["ZAMAN", "TARIH", "DATE"]):
+                if "KAYIT" not in norm_col and time_col is None: 
                     time_col = col
-            # Sıcaklık Kolonunu bul (Cihaz/Sensör ID kolonlarını es geç)
-            if "SICAK" in norm_col or "TEMP" in norm_col:
-                if "CIHAZ" not in norm_col:
-                    temp_col = col
-                    
-        # Eğer hala Tarih kolonu bulunamadıysa ilk gördüğü tarihi alır
+            if any(k in norm_col for k in ["SICAK", "TEMP", "ISI"]):
+                if not any(k in norm_col for k in ["CIHAZ", "SENSOR", "LIMIT", "DURUM", "NO", "ID"]):
+                    if temp_col is None:
+                        temp_col = col
+                        
         if not time_col:
             for col in df.columns:
                 if "TARIH" in normalize_str(col): 
@@ -303,12 +230,11 @@ def analyze_data(file):
                     break
         
         if not time_col or not temp_col: 
-            return None, {}, f"Gerekli 'Tarih' veya 'Sıcaklık' kolonları bulunamadı.\nAlgılanan Sütunlar: {', '.join(df.columns)}"
+            return None, {}, f"Sıcaklık veya Tarih sütunu bulunamadı. Tespit Edilen Sütunlar: {', '.join(df.columns)}"
 
-        # Tarih Dönüşümü
+        # Tarih ve Sıcaklık Çevirisi
         df['Timestamp'] = pd.to_datetime(df[time_col], dayfirst=True, errors='coerce')
         
-        # Sıcaklık Dönüşümü (Regex ile "6.03 °C" -> 6.03)
         if df[temp_col].dtype == object:
             df['Temp'] = df[temp_col].astype(str).str.replace(r'[^\d.,-]', '', regex=True).str.replace(',', '.')
             df['Temp'] = pd.to_numeric(df['Temp'], errors='coerce')
@@ -316,111 +242,46 @@ def analyze_data(file):
             df['Temp'] = pd.to_numeric(df[temp_col], errors='coerce')
             
         df = df.dropna(subset=['Timestamp', 'Temp']).sort_values('Timestamp')
+        
+        if len(df) == 0:
+            return None, {}, "Tüm sıcaklık ve tarih verileri boş veya dönüştürülemez formatta."
+
+        metadata['matched_time'] = time_col
+        metadata['matched_temp'] = temp_col
 
         return df, metadata, ""
 
     except Exception as e:
-        return None, {}, f"Bilinmeyen Kod Hatası: {str(e)}"
+        return None, {}, f"Bilinmeyen Hata: {str(e)}"
 
 # --- ANA AKIŞ ---
 if uploaded_file is not None:
     df, metadata, error_message = analyze_data(uploaded_file)
     
-    if df is not None:
-        meta_start_dt = parse_metadata_date(metadata.get('Baslangic', ''))
-        meta_end_dt = parse_metadata_date(metadata.get('Bitis', ''))
-        
-        disp_start = meta_start_dt.strftime('%d.%m.%Y %H:%M') if pd.notna(meta_start_dt) else "Belirtilmemiş"
-        disp_end = meta_end_dt.strftime('%d.%m.%Y %H:%M') if pd.notna(meta_end_dt) else "Belirtilmemiş"
-
-        st.info(f"""
-        **Birim:** {metadata.get('Birim','-')} | **Depo:** {metadata.get('Depo','-')}
-        📅 **Rapor Tarih Aralığı (Header):** {disp_start} — {disp_end}
-        """)
+    if df is not None and not df.empty:
+        # En üstte okunan veri sayısını gösteriyoruz!
+        st.success(f"✅ Sistem dosyayı başarıyla okudu! Toplam **{len(df)} adet** sıcaklık kaydı işleme alındı.")
+        st.info(f"**Birim:** {metadata.get('Birim','-')} | **Depo:** {metadata.get('Depo','-')}")
         
         if has_intervention and intervention_dt:
-            st.warning(f"⚠️ **DİKKAT:** {intervention_dt.strftime('%d.%m.%Y %H:%M')} tarihinden sonra aşı transferi/müdahale yapıldığı için bu tarihten sonraki veriler **karar analizine dahil edilmemiştir**.")
-            metadata['Mudahale'] = intervention_dt.strftime('%d.%m.%Y %H:%M')
+            st.warning(f"⚠️ DİKKAT: {intervention_dt.strftime('%d.%m.%Y %H:%M')} sonrası veriler yoksayıldı.")
 
-        # --- 1. KESİNTİ ANALİZİ ---
+        # --- İHLAL VE KARAR MANTIĞI ---
         gap_threshold = timedelta(hours=gap_threshold_hours)
         all_gaps = []
-
         df['TimeDiff'] = df['Timestamp'].diff()
         df['PrevTimestamp'] = df['Timestamp'].shift(1)
-        internal_gaps = df[df['TimeDiff'] >= gap_threshold].copy()
-        for _, row in internal_gaps.iterrows():
-            all_gaps.append({
-                "Tip": "Veri Arası Bosluk",
-                "Baslangic": row['PrevTimestamp'],
-                "Bitis": row['Timestamp'],
-                "Sure": row['TimeDiff']
-            })
-
-        if pd.notna(meta_start_dt):
-            first_data_time = df['Timestamp'].min()
-            start_diff = first_data_time - meta_start_dt
-            if start_diff >= gap_threshold:
-                all_gaps.insert(0, {
-                    "Tip": "Baslangic Kaybi",
-                    "Baslangic": meta_start_dt,
-                    "Bitis": first_data_time,
-                    "Sure": start_diff
-                })
-
-        if pd.notna(meta_end_dt):
-            last_data_time = df['Timestamp'].max()
-            end_diff = meta_end_dt - last_data_time
-            if end_diff >= gap_threshold:
-                all_gaps.append({
-                    "Tip": "Bitis Kaybi",
-                    "Baslangic": last_data_time,
-                    "Bitis": meta_end_dt,
-                    "Sure": end_diff
-                })
         
-        valid_gaps = []
-        for gap in all_gaps:
-            gap_start = gap["Baslangic"]
-            if has_intervention and intervention_dt and gap_start >= intervention_dt:
-                continue
-            valid_gaps.append(gap["Sure"])
-            
-        if valid_gaps:
-            max_gap_td = max(valid_gaps)
-        else:
-            max_gap_td = timedelta(0)
+        for _, row in df[df['TimeDiff'] >= gap_threshold].iterrows():
+            all_gaps.append({"Tip": "Veri Arası Bosluk", "Baslangic": row['PrevTimestamp'], "Bitis": row['Timestamp'], "Sure": row['TimeDiff']})
 
-        if all_gaps:
-            df_gaps_report = pd.DataFrame(all_gaps).sort_values('Baslangic')
-            df_gaps_report['Baslangic'] = df_gaps_report['Baslangic'].apply(lambda x: x.strftime('%d.%m.%Y %H:%M:%S'))
-            df_gaps_report['Bitis'] = df_gaps_report['Bitis'].apply(lambda x: x.strftime('%d.%m.%Y %H:%M:%S'))
-            df_gaps_report['Sure'] = df_gaps_report['Sure'].astype(str).apply(lambda x: x.split('.')[0])
-            df_gaps_report = df_gaps_report[["Tip", "Baslangic", "Bitis", "Sure"]]
-        else:
-            df_gaps_report = pd.DataFrame()
-
-        # --- 2. SICAKLIK İHLALİ ve KARAR ---
         df_clean = df.copy()
-
         if has_intervention and intervention_dt:
             df_decision_scope = df_clean[df_clean['Timestamp'] <= intervention_dt].copy()
         else:
             df_decision_scope = df_clean.copy()
 
         mkt_value = calculate_mkt(df_decision_scope['Temp'])
-
-        df_decision_scope['IsFreezing'] = df_decision_scope['Temp'] < 0
-        df_decision_scope['FreezeGroup'] = (df_decision_scope['IsFreezing'] != df_decision_scope['IsFreezing'].shift()).cumsum()
-        total_below_zero_duration = timedelta(0)
-        for _, grp in df_decision_scope[df_decision_scope['IsFreezing']].groupby('FreezeGroup'):
-            total_below_zero_duration += (grp['Timestamp'].max() - grp['Timestamp'].min())
-
-        df_decision_scope['IsCriticalHeat'] = df_decision_scope['Temp'] > 20
-        df_decision_scope['HeatGroup'] = (df_decision_scope['IsCriticalHeat'] != df_decision_scope['IsCriticalHeat'].shift()).cumsum()
-        total_above_20_duration = timedelta(0)
-        for _, grp in df_decision_scope[df_decision_scope['IsCriticalHeat']].groupby('HeatGroup'):
-            total_above_20_duration += (grp['Timestamp'].max() - grp['Timestamp'].min())
 
         df_decision_scope['Status'] = 0 
         df_decision_scope.loc[df_decision_scope['Temp'] < min_temp_limit, 'Status'] = -1
@@ -448,33 +309,19 @@ if uploaded_file is not None:
                 total_min_duration += dur
                 if global_min_val is None or extreme < global_min_val: global_min_val = extreme
 
-            violation_events.append({
-                "Tur": v_type,
-                "Baslangic": s_t.strftime('%d.%m.%Y %H:%M:%S'),
-                "Bitis": e_t.strftime('%d.%m.%Y %H:%M:%S'),
-                "Sure": format_duration(dur),
-                "En Uc Deger": extreme
-            })
-        
-        # --- AKILLI KARAR MANTIĞI ---
-        decision_msg = "MANUEL KONTROL GEREKLI (Ara Deger)"
-        check_dur_hours = total_max_duration.total_seconds() / 3600
-        check_max_val = global_max_val if global_max_val is not None else 0 
-        
-        if total_above_20_duration >= timedelta(hours=2):
-             decision_msg = "IMHA ONERILIR (KRITIK SICAKLIK > 20C VE SURE > 2 Saat)"
-        elif total_below_zero_duration >= timedelta(minutes=30):
-             decision_msg = "IMHA ONERILIR (dondurulabilir asilar haric)"
-        elif check_dur_hours >= 8 and check_max_val >= 15:
-            decision_msg = "IMHA ONERILIR (SURE > 8s VE ISI > 15C)"
-        elif max_gap_td >= gap_threshold:
-            decision_msg = f"KARANTINA / RISK: Cihazda {format_duration(max_gap_td)} sureli veri kesintisi (kor nokta) tespit edildi!"
-        elif check_dur_hours < 8 and (mkt_value is not None and mkt_value > max_temp_limit):
-            decision_msg = f"KARANTINA / RISK: Ihlal suresi 8 saati asmadi ama termal stres (MKT: {mkt_value:.2f}C) cok yuksek!"
-        elif check_dur_hours < 8 and check_max_val < 15:
-            decision_msg = "KULLANILABILIR ONERILIR"
+            violation_events.append({"Tur": v_type, "Baslangic": s_t.strftime('%d.%m.%Y %H:%M:%S'), "Bitis": e_t.strftime('%d.%m.%Y %H:%M:%S'), "Sure": format_duration(dur), "En Uc Deger": extreme})
         
         df_violations = pd.DataFrame(violation_events)
+        
+        # Karar Mekanizması
+        decision_msg = "MANUEL KONTROL GEREKLI"
+        if total_max_duration.total_seconds() == 0 and total_min_duration.total_seconds() == 0:
+            decision_msg = "TÜM VERİLER NORMAL - KULLANILABİLİR ONAYI"
+        elif total_max_duration.total_seconds() / 3600 >= 8 and (global_max_val and global_max_val >= 15):
+            decision_msg = "IMHA ONERILIR (SURE > 8s VE ISI > 15C)"
+        else:
+            decision_msg = "KARANTINA - RISKLI VERILER VAR"
+
         summary_stats = {
             "max_dur": format_duration(total_max_duration) if total_max_duration > timedelta(0) else "-",
             "max_val": f"{global_max_val} C" if global_max_val is not None else "-",
@@ -482,106 +329,64 @@ if uploaded_file is not None:
             "min_val": f"{global_min_val} C" if global_min_val is not None else "-",
             "mkt_val": f"{mkt_value:.2f} C" if mkt_value is not None else "-",
             "decision": decision_msg,
-            "intervention": intervention_dt.strftime('%d.%m.%Y %H:%M') if (has_intervention and intervention_dt) else None
         }
 
-        # --- 3. İSTATİSTİK ANALİZ ---
-        df_clean['Date'] = df_clean['Timestamp'].dt.date
-        daily_stats = df_clean.groupby('Date')['Temp'].agg(['mean', 'std', 'min', 'max']).reset_index()
-        daily_stats.columns = ['Tarih', 'Ortalama', 'StdSapma', 'Min', 'Max']
-        
-        slope = 0
-        if len(daily_stats) > 1:
-            x = np.arange(len(daily_stats))
-            y = daily_stats['Ortalama'].values
-            z = np.polyfit(x, y, 1)
-            slope = z[0]
-
-        # --- ARAYÜZ GÖRÜNÜMÜ ---
-        tab1, tab2, tab3 = st.tabs(["⚠️ Veri Kesintileri", "🚨 Sıcaklık İhlalleri", "📊 İstatistik & Trend"])
+        # --- ARAYÜZ (YENİLENMİŞ TASARIM) ---
+        tab1, tab2 = st.tabs(["📈 Genel Sıcaklık Grafiği (Tüm Veriler)", "🚨 İhlal Raporları ve Çıktılar"])
 
         with tab1:
-            st.subheader(f"Veri Kesintisi Raporu (> {gap_threshold_hours} Saat)")
-            if not df_gaps_report.empty:
-                st.dataframe(df_gaps_report, use_container_width=True)
-                pdf_data = create_pdf_bytes(df_gaps_report, metadata, "Veri Kesintisi Raporu")
-                st.download_button("📄 Kesinti Raporunu PDF İndir", pdf_data, "veri_kesinti_raporu.pdf", "application/pdf")
-            else:
-                st.success("Belirlenen kriterlerde kesinti bulunamadı.")
+            st.subheader("Dolap Sıcaklık Seyri")
+            st.markdown("Aşağıdaki grafikte okunan tüm sıcaklık değerlerini saniye saniye görebilirsiniz.")
+            
+            # Dinamik Çizgi Grafiği (Tüm Verileri Gösterir)
+            fig_line = px.line(df_clean, x='Timestamp', y='Temp', title='Sıcaklık Grafiği')
+            # 2 ve 8 derece sınır çizgilerini ekle
+            fig_line.add_hline(y=max_temp_limit, line_dash="dash", line_color="red", annotation_text=f"Max Limit ({max_temp_limit}°C)")
+            fig_line.add_hline(y=min_temp_limit, line_dash="dash", line_color="blue", annotation_text=f"Min Limit ({min_temp_limit}°C)")
+            fig_line.update_layout(yaxis_title="Sıcaklık (°C)", xaxis_title="Tarih / Saat")
+            st.plotly_chart(fig_line, use_container_width=True)
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown("#### 📂 Tüm Sıcaklık Verileri (Liste)")
+                df_display = df_clean[['Timestamp', 'Temp']].copy()
+                df_display['Timestamp'] = df_display['Timestamp'].dt.strftime('%d.%m.%Y %H:%M:%S')
+                df_display.rename(columns={'Timestamp': 'Zaman', 'Temp': 'Sıcaklık (°C)'}, inplace=True)
+                st.dataframe(df_display, use_container_width=True, height=300)
+            
+            with col_b:
+                st.markdown("#### 🖨️ Tam Rapor (Tüm Veriler)")
+                st.info("Bu buton ile ihlal olsun veya olmasın okunan bütün sıcaklık verilerinin tam dökümünü Sağlık Bakanlığı formatında PDF olarak indirebilirsiniz.")
+                # PDF Raporunu oluştur (Tüm veriler için)
+                pdf_full_data = create_pdf_bytes(df_display, metadata, "Tum Sicaklik Raporu (Tam Liste)")
+                st.download_button("📄 Tüm Verilerin PDF Raporunu İndir", pdf_full_data, "tum_sicaklik_verileri.pdf", "application/pdf")
 
         with tab2:
-            st.subheader("Sıcaklık İhlal Raporu")
+            st.subheader("Otomatik Karar & İhlal Tespiti")
             
-            st.markdown("### 🚦 Otomatik Değerlendirme")
-            if "IMHA" in decision_msg:
-                st.error(f"🚨 **KARAR:** {decision_msg}")
-            elif "KARANTINA" in decision_msg:
-                st.warning(f"🧪 **KARAR:** {decision_msg}")
-            elif "KULLANILABILIR" in decision_msg:
+            if "KULLANILABİLİR" in decision_msg:
                 st.success(f"✅ **KARAR:** {decision_msg}")
+            elif "IMHA" in decision_msg:
+                st.error(f"🚨 **KARAR:** {decision_msg}")
             else:
-                st.info(f"⚠️ **KARAR:** {decision_msg}")
-            
-            if has_intervention and intervention_dt:
-                st.caption(f"ℹ️ Hesaplamalar **{intervention_dt.strftime('%d.%m.%Y %H:%M')}** öncesi verilere göre yapılmıştır.")
+                st.warning(f"⚠️ **KARAR:** {decision_msg}")
 
-            st.divider()
-            
             col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric("Toplam Üst Limit Aşım", summary_stats["max_dur"])
             col2.metric("En Yüksek Sıcaklık", summary_stats["max_val"])
             col3.metric("Toplam Alt Limit Aşım", summary_stats["min_dur"])
             col4.metric("En Düşük Sıcaklık", summary_stats["min_val"])
-            if mkt_value is not None:
-                col5.metric("Kinetik Sıcaklık (MKT)", f"{mkt_value:.2f} °C", 
-                            help="Aşıların maruz kaldığı toplam termal stresi logaritmik olarak ölçer.")
+            col5.metric("Kinetik Sıcaklık (MKT)", f"{mkt_value:.2f} °C" if mkt_value else "-")
             
+            st.markdown("#### 🚨 Limit Aşımı (İhlal) Olan Anlar")
             if not df_violations.empty:
                 st.dataframe(df_violations, use_container_width=True)
-                pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu", violation_summary=summary_stats)
-                st.download_button("📄 İhlal Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal_raporu.pdf", "application/pdf")
+                pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu", summary_stats)
+                st.download_button("📄 Sadece İhlalleri (PDF) İndir", pdf_data_v, "sicaklik_ihlal.pdf", "application/pdf")
             else:
-                st.info("İhlal tablosu boş (limitler içinde).")
-                pdf_data_v = create_pdf_bytes(df_violations, metadata, "Sicaklik Ihlal Raporu", violation_summary=summary_stats)
-                st.download_button("📄 Özet Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal_raporu.pdf", "application/pdf")
-        
-        with tab3:
-            st.subheader("Kestirimci Bakım & İstatistik Analizi")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Genel Ortalama", f"{df_clean['Temp'].mean():.2f} °C")
-            c2.metric("Genel Std. Sapma", f"{df_clean['Temp'].std():.2f} °C")
-            
-            if mkt_value is not None:
-                c3.metric("Ort. Kinetik Sıc. (MKT)", f"{mkt_value:.2f} °C")
-            
-            trend_msg = "Veri yetersiz."
-            trend_color = "off"
-            if len(daily_stats) > 1:
-                if slope > 0.05:
-                    trend_msg = f"⚠️ ARTIŞ: Günlük +{slope:.3f}°C"
-                    trend_color = "inverse"
-                elif slope < -0.05:
-                    trend_msg = f"ℹ️ AZALIŞ: Günlük -{abs(slope):.3f}°C"
-                    trend_color = "normal"
-                else:
-                    trend_msg = "✅ STABİL"
-                    trend_color = "normal"
-            c4.metric("Sıcaklık Trendi", f"{slope:.4f}", delta=trend_msg, delta_color=trend_color)
-
-            col_g1, col_g2 = st.columns(2)
-            with col_g1:
-                st.markdown("#### 📅 Günlük Ortalama")
-                fig_avg = px.bar(daily_stats, x='Tarih', y='Ortalama', color='Ortalama', color_continuous_scale='Bluered')
-                if has_intervention and intervention_dt:
-                     fig_avg.add_vline(x=intervention_dt.timestamp() * 1000, line_dash="dash", line_color="green", annotation_text="Müdahale")
-                st.plotly_chart(fig_avg, use_container_width=True)
-            with col_g2:
-                st.markdown("#### 📉 Stabilite (Std. Sapma)")
-                fig_std = px.line(daily_stats, x='Tarih', y='StdSapma', markers=True)
-                fig_std.update_traces(line_color='#FF5733')
-                st.plotly_chart(fig_std, use_container_width=True)
-
-            st.dataframe(daily_stats, use_container_width=True)
+                st.success("Tebrikler! Bu tarih aralığında veriler normal sınırlar içerisindedir, sıcaklık ihlali tespit edilmemiştir.")
+                pdf_data_v = create_pdf_bytes(pd.DataFrame(), metadata, "Sicaklik Ihlal Raporu", summary_stats, empty_msg="TEBRIKLER: Bu tarih araliginda hicbir sicaklik ihlali (limit asimi) tespit edilmemistir.")
+                st.download_button("📄 Boş İhlal Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal.pdf", "application/pdf")
 
     else:
         st.error(f"Dosya okunamadı! Hata Sebebi: **{error_message}**")
