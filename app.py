@@ -106,6 +106,14 @@ class ReportPDF(FPDF):
         self.cell(0, 6, tr_fix(self.metadata.get('Depo', '-')), ln=True)
         self.cell(40, 6, tr_fix("Stok Birimi:"), border=0)
         self.cell(0, 6, tr_fix(self.metadata.get('Stok', '-')), ln=True)
+        
+        # Referans alınan dönem bilgisi
+        if self.metadata.get('expected_start') and self.metadata.get('expected_end'):
+            start_str = self.metadata['expected_start'].strftime('%d.%m.%Y %H:%M')
+            end_str = self.metadata['expected_end'].strftime('%d.%m.%Y %H:%M')
+            self.cell(40, 6, tr_fix("Rapor Donemi:"), border=0)
+            self.cell(0, 6, f"{start_str} - {end_str}", ln=True)
+            
         self.ln(5)
 
     def footer(self):
@@ -173,15 +181,25 @@ def extract_metadata_from_text(text):
             for i in range(len(parts)-1):
                 key = normalize_str(parts[i])
                 val = parts[i+1]
+                
+                # Başlıktaki DÖNEM (A5/B5 mantığı)
+                if "DONEM" in key and "-" in val:
+                    d_parts = val.split("-")
+                    meta['Baslangic'] = d_parts[0].strip()
+                    meta['Bitis'] = d_parts[1].strip()
+                
                 if not val:
                     for j in range(i+1, len(parts)):
                         if parts[j]:
                             val = parts[j]
                             break
                 if not val: continue
+                
                 if "BIRIM" == key: meta['Birim'] = val
                 elif "DEPO" == key: meta['Depo'] = val
                 elif "STOK BIRIMI" in key: meta['Stok'] = val
+                elif "BASLANGIC" == key and 'Baslangic' not in meta: meta['Baslangic'] = val
+                elif "BITIS" == key and 'Bitis' not in meta: meta['Bitis'] = val
     except:
         pass
     return meta
@@ -200,9 +218,19 @@ def analyze_data(file):
                 header_idx = 0
                 for i in range(min(30, len(df_raw))):
                     row_vals = [normalize_str(x) for x in df_raw.iloc[i].tolist()]
+                    
+                    if "DONEM" in row_vals:
+                        idx = row_vals.index("DONEM")
+                        if idx + 1 < len(row_vals):
+                            val = df_raw.iloc[i, idx+1]
+                            if isinstance(val, str) and "-" in val:
+                                d_parts = val.split("-")
+                                metadata['Baslangic'] = d_parts[0].strip()
+                                metadata['Bitis'] = d_parts[1].strip()
+
                     if any("SICAKLIK" in v for v in row_vals) and any(("ZAMAN" in v or "TARIH" in v) for v in row_vals):
                         header_idx = i
-                        break
+                        
                 df = pd.read_excel(io.BytesIO(file_bytes), header=header_idx)
             except Exception as e:
                 return None, {}, f"Excel Hatası: {str(e)}"
@@ -214,8 +242,7 @@ def analyze_data(file):
             metadata = extract_metadata_from_text(text)
             
             lines = text.splitlines()
-            if not lines:
-                return None, {}, "Dosya tamamen boş."
+            if not lines: return None, {}, "Dosya tamamen boş."
                 
             header_idx = 0
             for idx, line in enumerate(lines[:50]):
@@ -226,11 +253,8 @@ def analyze_data(file):
             
             header_line = lines[header_idx]
             sep = ';' if header_line.count(';') >= header_line.count(',') else ','
-            
-            try:
-                df = pd.read_csv(io.StringIO(text), header=header_idx, sep=sep, engine='python', on_bad_lines='skip')
-            except Exception as e:
-                return None, {}, f"CSV Ayraç Hatası: {str(e)}"
+            try: df = pd.read_csv(io.StringIO(text), header=header_idx, sep=sep, engine='python', on_bad_lines='skip')
+            except Exception as e: return None, {}, f"CSV Ayraç Hatası: {str(e)}"
 
         if df is None or df.empty: return None, {}, "Tablo verisi bulunamadı."
         
@@ -243,12 +267,10 @@ def analyze_data(file):
         for col in df.columns:
             norm_col = normalize_str(col)
             if any(k in norm_col for k in ["ZAMAN", "TARIH", "DATE"]):
-                if "KAYIT" not in norm_col and time_col is None: 
-                    time_col = col
+                if "KAYIT" not in norm_col and time_col is None: time_col = col
             if any(k in norm_col for k in ["SICAK", "TEMP", "ISI"]):
                 if not any(k in norm_col for k in ["CIHAZ", "SENSOR", "LIMIT", "DURUM", "NO", "ID"]):
-                    if temp_col is None:
-                        temp_col = col
+                    if temp_col is None: temp_col = col
                         
         if not time_col:
             for col in df.columns:
@@ -259,9 +281,14 @@ def analyze_data(file):
         if not time_col or not temp_col: 
             return None, {}, f"Sıcaklık veya Tarih sütunu bulunamadı. Tespit Edilen Sütunlar: {', '.join(df.columns)}"
 
+        # Beklenen Başlangıç ve Bitiş (Dönem)
+        metadata['expected_start'] = parse_date_robust(metadata.get('Baslangic'))
+        metadata['expected_end'] = parse_date_robust(metadata.get('Bitis'))
+
         df['Timestamp'] = df[time_col].apply(parse_date_robust)
         df['Temp'] = df[temp_col].apply(parse_temp_robust)
             
+        # Boş sıcaklık verilerini sil (Bu durum otomatik olarak iki okuma arasını uzatarak kesinti yaratır)
         df = df.dropna(subset=['Timestamp', 'Temp']).sort_values('Timestamp')
         
         if len(df) == 0:
@@ -279,10 +306,17 @@ if uploaded_file is not None:
     
     if df is not None and not df.empty:
         
-        # --- DOSYA VE DOLAP BİLGİLERİ ---
-        actual_start = df['Timestamp'].min().strftime('%d.%m.%Y %H:%M')
-        actual_end = df['Timestamp'].max().strftime('%d.%m.%Y %H:%M')
+        expected_start = metadata.get('expected_start')
+        expected_end = metadata.get('expected_end')
         
+        actual_start_dt = df['Timestamp'].min()
+        actual_end_dt = df['Timestamp'].max()
+        
+        # Eğer rapor dönemi başlığı okunamadıysa, gerçek okunan veriyi referans al
+        ref_start_str = expected_start.strftime('%d.%m.%Y %H:%M') if pd.notna(expected_start) else actual_start_dt.strftime('%d.%m.%Y %H:%M')
+        ref_end_str = expected_end.strftime('%d.%m.%Y %H:%M') if pd.notna(expected_end) else actual_end_dt.strftime('%d.%m.%Y %H:%M')
+
+        # --- DOSYA VE DOLAP BİLGİLERİ ---
         st.markdown(f"""
         <div style="background-color: #f0f2f6; padding: 20px; border-radius: 10px; margin-bottom: 20px; border-left: 5px solid #0052cc;">
             <h4 style="margin-top: 0; color: #0052cc;">📋 Özet Bilgi Kartı</h4>
@@ -292,9 +326,9 @@ if uploaded_file is not None:
                     <b>📦 Stok / Dolap Kodu:</b> {metadata.get('Stok', metadata.get('Depo', 'Otomatik algılanamadı'))}
                 </div>
                 <div>
-                    <b>🕒 Başlangıç:</b> {actual_start}<br>
-                    <b>🕒 Bitiş:</b> {actual_end}<br>
-                    <b>📊 Toplam Kayıt:</b> {len(df)} adet
+                    <b>📅 Rapor Dönemi (Başlangıç):</b> {ref_start_str}<br>
+                    <b>📅 Rapor Dönemi (Bitiş):</b> {ref_end_str}<br>
+                    <b>📊 Geçerli Sıcaklık Kaydı:</b> {len(df)} adet
                 </div>
             </div>
         </div>
@@ -303,15 +337,27 @@ if uploaded_file is not None:
         if has_intervention and intervention_dt:
             st.warning(f"⚠️ DİKKAT: {intervention_dt.strftime('%d.%m.%Y %H:%M')} sonrası veriler yoksayıldı.")
 
-        # --- İHLAL VE KARAR MANTIĞI ---
+        # --- KESİNTİ (BOŞLUK) TESPİTİ ---
         gap_threshold = timedelta(hours=gap_threshold_hours)
         all_gaps = []
+        
+        # 1. Beklenen Dönem Başlangıcı ile İlk Veri Arasındaki Kesinti
+        if pd.notna(expected_start):
+            start_diff = actual_start_dt - expected_start
+            if start_diff >= gap_threshold:
+                all_gaps.append({"Tip": "Başlangıç Veri Kaybı", "Baslangic": expected_start, "Bitis": actual_start_dt, "Sure": start_diff})
+
+        # 2. Verilerin Kendi İçerisindeki (veya eksik sıcaklık hücrelerindeki) Kesintiler
         df['TimeDiff'] = df['Timestamp'].diff()
         df['PrevTimestamp'] = df['Timestamp'].shift(1)
-        
-        # KESİNTİLERİ TESPİT ET
         for _, row in df[df['TimeDiff'] >= gap_threshold].iterrows():
-            all_gaps.append({"Tip": "Sensör Veri Kesintisi", "Baslangic": row['PrevTimestamp'], "Bitis": row['Timestamp'], "Sure": row['TimeDiff']})
+            all_gaps.append({"Tip": "Sensör Veri Kesintisi (Ara Boşluk)", "Baslangic": row['PrevTimestamp'], "Bitis": row['Timestamp'], "Sure": row['TimeDiff']})
+
+        # 3. Son Veri ile Beklenen Dönem Bitişi Arasındaki Kesinti
+        if pd.notna(expected_end):
+            end_diff = expected_end - actual_end_dt
+            if end_diff >= gap_threshold:
+                all_gaps.append({"Tip": "Bitiş Veri Kaybı", "Baslangic": actual_end_dt, "Bitis": expected_end, "Sure": end_diff})
 
         # KESİNTİLERİ TABLOYA ÇEVİR VE FORMATLA
         df_gaps_report = pd.DataFrame()
@@ -327,6 +373,7 @@ if uploaded_file is not None:
                 "Sure": "Toplam Kesinti Süresi"
             }, inplace=True)
 
+        # --- İHLAL VE KARAR MANTIĞI ---
         df_clean = df.copy()
         if has_intervention and intervention_dt:
             df_decision_scope = df_clean[df_clean['Timestamp'] <= intervention_dt].copy()
@@ -388,7 +435,6 @@ if uploaded_file is not None:
         }
 
         # --- ARAYÜZ GRAFİK VE TABLOLAR ---
-        # Veri kesintileri için yepyeni bir sekme (Tab 3) eklendi
         tab1, tab2, tab3 = st.tabs(["📈 Genel Sıcaklık Grafiği", "🚨 İhlal Raporları", "⚠️ Veri Kesintileri"])
 
         with tab1:
@@ -442,19 +488,19 @@ if uploaded_file is not None:
                 pdf_data_v = create_pdf_bytes(pd.DataFrame(), metadata, "Sicaklik Ihlal Raporu", summary_stats, empty_msg="TEBRIKLER: Bu tarih araliginda hicbir sicaklik ihlali (limit asimi) tespit edilmemistir.")
                 st.download_button("📄 Boş İhlal Raporunu PDF İndir", pdf_data_v, "sicaklik_ihlal.pdf", "application/pdf")
 
-        # --- YENİ: KESİNTİLER SEKMESİ ---
+        # --- YENİ EKLENEN: KESİNTİLER SEKMESİ ---
         with tab3:
             st.subheader(f"Veri Kesintisi Raporu (>{gap_threshold_hours} Saat)")
             
             if not df_gaps_report.empty:
-                st.error(f"🚨 DİKKAT: Cihazda **{len(df_gaps_report)} adet** (belirlenen {gap_threshold_hours} saat limitini aşan) veri kesintisi tespit edilmiştir!")
-                st.markdown("Cihaz pilinin bitmesi, bağlantı kopukluğu veya cihazın kapatılması sebebiyle aşağıdaki zaman aralıklarında veri kaydedilmemiştir (Kör Nokta).")
+                st.error(f"🚨 DİKKAT: Cihazda **{len(df_gaps_report)} adet** (belirlenen {gap_threshold_hours} saat limitini aşan) veri kesintisi veya kayıp ölçüm tespit edilmiştir!")
+                st.markdown("Cihaz pilinin bitmesi, bağlantı kopukluğu veya verinin 'boş' geçilmesi sebebiyle aşağıdaki zaman aralıklarında veri eksikliği (Kör Nokta) yaşanmıştır.")
                 st.dataframe(df_gaps_report, use_container_width=True)
                 
                 pdf_data_gaps = create_pdf_bytes(df_gaps_report, metadata, "Veri Kesintisi Raporu")
                 st.download_button("📄 Kesinti Raporunu PDF İndir", pdf_data_gaps, "veri_kesintisi_raporu.pdf", "application/pdf")
             else:
-                st.success(f"✅ Sistem belirlenen kriterlerde ({gap_threshold_hours} saati aşan) hiçbir veri kesintisi bulamadı. Sensör aralıksız veri kaydetmiştir.")
+                st.success(f"✅ Sistem, referans alınan başlangıç ve bitiş tarihleri ({ref_start_str} - {ref_end_str}) dahil olmak üzere, belirlenen kriterlerde ({gap_threshold_hours} saati aşan) hiçbir veri kesintisi bulamadı. Sensör aralıksız veri kaydetmiştir.")
 
     else:
         st.error(f"Dosya okunamadı! Hata Sebebi: **{error_message}**")
