@@ -195,7 +195,7 @@ def extract_metadata_from_text(text):
                 
                 if "BIRIM" == key: meta['Birim'] = val
                 elif "DEPO" == key: meta['Depo'] = val
-                elif "STOK BIRIMI" in key: meta['Stok'] = val
+                elif "STOK BIRIMI" in key: meta['Stok'] = val # C9 ve D9 hücrelerinden tam değeri okur
                 elif "BASLANGIC" == key and 'Baslangic' not in meta: meta['Baslangic'] = val
                 elif "BITIS" == key and 'Bitis' not in meta: meta['Bitis'] = val
     except:
@@ -225,6 +225,12 @@ def analyze_data(file):
                                 d_parts = val.split("-")
                                 metadata['Baslangic'] = d_parts[0].strip()
                                 metadata['Bitis'] = d_parts[1].strip()
+
+                    # Excel hücrelerinden Stok Birimini direkt yakalama garantisi
+                    if "STOK BIRIMI" in row_vals:
+                        s_idx = row_vals.index("STOK BIRIMI")
+                        if s_idx + 1 < len(row_vals):
+                            metadata['Stok'] = df_raw.iloc[i, s_idx+1]
 
                     if any("SICAKLIK" in v for v in row_vals) and any(("ZAMAN" in v or "TARIH" in v) for v in row_vals):
                         header_idx = i
@@ -311,14 +317,14 @@ if uploaded_file is not None:
         ref_start_str = expected_start.strftime('%d.%m.%Y %H:%M') if pd.notna(expected_start) else actual_start_dt.strftime('%d.%m.%Y %H:%M')
         ref_end_str = expected_end.strftime('%d.%m.%Y %H:%M') if pd.notna(expected_end) else actual_end_dt.strftime('%d.%m.%Y %H:%M')
 
-        # --- DOSYA VE DOLAP BİLGİLERİ ---
+        # --- DOSYA VE DOLAP BİLGİLERİ (GÜNCELLENDİ: STOK BİRİMİ C9-D9 ODAKLI) ---
         st.markdown(f"""
         <div style="background-color: #f0f2f6; padding: 20px; border-radius: 10px; margin-bottom: 20px; border-left: 5px solid #0052cc;">
             <h4 style="margin-top: 0; color: #0052cc;">📋 Özet Bilgi Kartı</h4>
             <div style="display: flex; justify-content: space-between;">
                 <div>
                     <b>🏢 Birim Adı:</b> {metadata.get('Birim', 'Otomatik algılanamadı')}<br>
-                    <b>📦 Stok / Dolap Kodu:</b> {metadata.get('Stok', metadata.get('Depo', 'Otomatik algılanamadı'))}
+                    <b>📦 Stok Birimi:</b> {metadata.get('Stok', 'Otomatik algılanamadı')}
                 </div>
                 <div>
                     <b>📅 Rapor Dönemi (Başlangıç):</b> {ref_start_str}<br>
@@ -406,7 +412,7 @@ if uploaded_file is not None:
         decision_msg = ""
         status_term = ""
         
-        # Kesinti varsa diğer sıcaklık kararlarını ezer ve kullanıcının istediği mesajı verir
+        # Kesinti varsa diğer sıcaklık kararlarını ezer
         if len(all_gaps) > 0:
             decision_msg = "VERİ KESİNTİSİ MEVCUT, İKİNCİL SICAKLIK ÖLÇÜMLERİNİ DEĞERLENDİR"
             status_term = "Acil Müdahale"
