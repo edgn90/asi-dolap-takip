@@ -193,11 +193,14 @@ def extract_metadata_from_text(text):
                             break
                 if not val: continue
                 
-                if "BIRIM" == key: meta['Birim'] = val
+                if "STOK BIRIMI" in key:
+                    for j in range(i+1, len(parts)):
+                        if parts[j] and not re.match(r'^\d+(\.\d+)?$', parts[j]):
+                            meta['Stok'] = parts[j]
+                            break
+                
+                if "BIRIM" == key and "STOK" not in key: meta['Birim'] = val
                 elif "DEPO" == key: meta['Depo'] = val
-                elif "STOK BIRIMI" in key: meta['Stok'] = val # C9 ve D9 hücrelerinden tam değeri okur
-                elif "BASLANGIC" == key and 'Baslangic' not in meta: meta['Baslangic'] = val
-                elif "BITIS" == key and 'Bitis' not in meta: meta['Bitis'] = val
     except:
         pass
     return meta
@@ -226,11 +229,24 @@ def analyze_data(file):
                                 metadata['Baslangic'] = d_parts[0].strip()
                                 metadata['Bitis'] = d_parts[1].strip()
 
-                    # Excel hücrelerinden Stok Birimini direkt yakalama garantisi
+                    # B8, B9, C9 Hedefli Eşleştirmeler
+                    if "BIRIM" in row_vals and not any("STOK" in v for v in row_vals):
+                        b_idx = row_vals.index("BIRIM")
+                        if b_idx + 1 < len(row_vals):
+                            metadata['Birim'] = df_raw.iloc[i, b_idx+1]
+                            
+                    if "DEPO" in row_vals:
+                        d_idx = row_vals.index("DEPO")
+                        if d_idx + 1 < len(row_vals):
+                            metadata['Depo'] = df_raw.iloc[i, d_idx+1]
+
                     if "STOK BIRIMI" in row_vals:
                         s_idx = row_vals.index("STOK BIRIMI")
-                        if s_idx + 1 < len(row_vals):
-                            metadata['Stok'] = df_raw.iloc[i, s_idx+1]
+                        for k in range(s_idx + 1, min(s_idx + 5, len(row_vals))):
+                            val = df_raw.iloc[i, k]
+                            if isinstance(val, str) and len(val) > 3 and not re.match(r'^\d+(\.\d+)?$', val):
+                                metadata['Stok'] = val
+                                break
 
                     if any("SICAKLIK" in v for v in row_vals) and any(("ZAMAN" in v or "TARIH" in v) for v in row_vals):
                         header_idx = i
@@ -317,13 +333,14 @@ if uploaded_file is not None:
         ref_start_str = expected_start.strftime('%d.%m.%Y %H:%M') if pd.notna(expected_start) else actual_start_dt.strftime('%d.%m.%Y %H:%M')
         ref_end_str = expected_end.strftime('%d.%m.%Y %H:%M') if pd.notna(expected_end) else actual_end_dt.strftime('%d.%m.%Y %H:%M')
 
-        # --- DOSYA VE DOLAP BİLGİLERİ (GÜNCELLENDİ: STOK BİRİMİ C9-D9 ODAKLI) ---
+        # --- DOSYA VE DOLAP BİLGİLERİ (BİRİM, DEPO, STOK) ---
         st.markdown(f"""
         <div style="background-color: #f0f2f6; padding: 20px; border-radius: 10px; margin-bottom: 20px; border-left: 5px solid #0052cc;">
             <h4 style="margin-top: 0; color: #0052cc;">📋 Özet Bilgi Kartı</h4>
             <div style="display: flex; justify-content: space-between;">
                 <div>
                     <b>🏢 Birim Adı:</b> {metadata.get('Birim', 'Otomatik algılanamadı')}<br>
+                    <b>🏢 Depo Adı:</b> {metadata.get('Depo', 'Otomatik algılanamadı')}<br>
                     <b>📦 Stok Birimi:</b> {metadata.get('Stok', 'Otomatik algılanamadı')}
                 </div>
                 <div>
@@ -412,7 +429,7 @@ if uploaded_file is not None:
         decision_msg = ""
         status_term = ""
         
-        # Kesinti varsa diğer sıcaklık kararlarını ezer
+        # Kesinti Kararı Eziyor
         if len(all_gaps) > 0:
             decision_msg = "VERİ KESİNTİSİ MEVCUT, İKİNCİL SICAKLIK ÖLÇÜMLERİNİ DEĞERLENDİR"
             status_term = "Acil Müdahale"
