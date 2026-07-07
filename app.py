@@ -79,7 +79,9 @@ def parse_date_robust(date_str):
 def parse_temp_robust(temp_str):
     if pd.isna(temp_str): return np.nan
     s = str(temp_str).strip()
-    m = re.search(r'(-?\d+[,.]\d+|-?\d+)', s)
+    # YENİ KATI KURAL: Sadece saf sayıları ve derece (C) sembollerini kabul eder. 
+    # İçinde "Sensor 1", "Alarm" gibi metin barındıran tüm satırları engeller.
+    m = re.search(r'^\s*[<>]?\s*(-?\d+(?:[,.]\d+)?)\s*(?:°?C|c)?\s*$', s, re.IGNORECASE)
     if m:
         val = m.group(1).replace(',', '.')
         try:
@@ -229,7 +231,6 @@ def analyze_data(file):
                                 metadata['Baslangic'] = d_parts[0].strip()
                                 metadata['Bitis'] = d_parts[1].strip()
 
-                    # B8, B9, C9 Hedefli Eşleştirmeler
                     if "BIRIM" in row_vals and not any("STOK" in v for v in row_vals):
                         b_idx = row_vals.index("BIRIM")
                         if b_idx + 1 < len(row_vals):
@@ -333,7 +334,7 @@ if uploaded_file is not None:
         ref_start_str = expected_start.strftime('%d.%m.%Y %H:%M') if pd.notna(expected_start) else actual_start_dt.strftime('%d.%m.%Y %H:%M')
         ref_end_str = expected_end.strftime('%d.%m.%Y %H:%M') if pd.notna(expected_end) else actual_end_dt.strftime('%d.%m.%Y %H:%M')
 
-        # --- DOSYA VE DOLAP BİLGİLERİ (BİRİM, DEPO, STOK) ---
+        # --- DOSYA VE DOLAP BİLGİLERİ ---
         st.markdown(f"""
         <div style="background-color: #f0f2f6; padding: 20px; border-radius: 10px; margin-bottom: 20px; border-left: 5px solid #0052cc;">
             <h4 style="margin-top: 0; color: #0052cc;">📋 Özet Bilgi Kartı</h4>
