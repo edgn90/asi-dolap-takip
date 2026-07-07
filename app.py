@@ -79,8 +79,7 @@ def parse_date_robust(date_str):
 def parse_temp_robust(temp_str):
     if pd.isna(temp_str): return np.nan
     s = str(temp_str).strip()
-    # YENİ KATI KURAL: Sadece saf sayıları ve derece (C) sembollerini kabul eder. 
-    # İçinde "Sensor 1", "Alarm" gibi metin barındıran tüm satırları engeller.
+    # Katı Kural: Sadece gerçek sayısal sıcaklıkları alır. ("Sensör 1", "Alarm" gibi metin içeren satırları atlar)
     m = re.search(r'^\s*[<>]?\s*(-?\d+(?:[,.]\d+)?)\s*(?:°?C|c)?\s*$', s, re.IGNORECASE)
     if m:
         val = m.group(1).replace(',', '.')
@@ -459,9 +458,20 @@ if uploaded_file is not None:
 
         with tab1:
             st.subheader("Dolap Sıcaklık Seyri")
-            st.markdown("Aşağıdaki grafikte okunan tüm sıcaklık değerlerini saniye saniye görebilirsiniz.")
+            st.markdown("Aşağıdaki grafikte okunan tüm sıcaklık değerlerini saniye saniye görebilirsiniz. **Veri kesintisi yaşanılan zaman aralıkları grafikte boşluk (kopuk çizgi) olarak gösterilmektedir.**")
             
-            fig_line = px.line(df_clean, x='Timestamp', y='Temp', title='Sıcaklık Grafiği')
+            # --- YENİ EKLENEN KISIM: Grafikte Kesintileri Boşluk (Kopuk Çizgi) Olarak Gösterme ---
+            df_plot = df_clean.copy()
+            nan_rows = []
+            for _, gap_row in df_plot[df_plot['TimeDiff'] >= gap_threshold].iterrows():
+                nan_rows.append({
+                    'Timestamp': gap_row['PrevTimestamp'] + timedelta(seconds=1),
+                    'Temp': np.nan
+                })
+            if nan_rows:
+                df_plot = pd.concat([df_plot, pd.DataFrame(nan_rows)], ignore_index=True).sort_values('Timestamp')
+
+            fig_line = px.line(df_plot, x='Timestamp', y='Temp', title='Sıcaklık Grafiği')
             fig_line.add_hline(y=max_temp_limit, line_dash="dash", line_color="red", annotation_text=f"Max Limit ({max_temp_limit}°C)")
             fig_line.add_hline(y=min_temp_limit, line_dash="dash", line_color="blue", annotation_text=f"Min Limit ({min_temp_limit}°C)")
             fig_line.update_layout(yaxis_title="Sıcaklık (°C)", xaxis_title="Tarih / Saat")
